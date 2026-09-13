@@ -1,0 +1,16 @@
+{
+  "name": "omasafe",
+  "version": "0.3.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "c8 --all --include=SafeModel.js --check-coverage --lines 95 --functions 95 --branches 90 --statements 95 node --test tests/model.test.js",
+    "test:contracts": "node --test tests/source-contract.test.js",
+    "audit": "audit-harness classify . && audit-harness audit . --deep",
+    "check": "npm test && npm run audit"
+  },
+  "devDependencies": {
+    "@intentsolutions/audit-harness": "1.4.0",
+    "c8": "12.0.0"
+  }
+}
