@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "c8 --all --include=SafeModel.js --check-coverage --lines 95 --functions 95 --branches 90 --statements 95 node --test tests/model.test.js"
+    "test": "c8 --all --include=SafeModel.js --check-coverage --lines 95 --functions 95 --branches 90 --statements 95 node --test tests/model.test.js tests/model-security.test.js"
   },
   "devDependencies": {
     "c8": "12.0.0"
