@@ -393,7 +393,7 @@ Panel {
                         TextField {
                             width: parent.width
                             password: true
-                            placeholderText: "Password (4+ characters)"
+                            placeholderText: "Password (12+ characters)"
                             foreground: root.foreground
                             font.family: root.fontFamily
                             text: root.setupPass
@@ -440,8 +440,8 @@ Panel {
                             function activate() {
                                 if (!root.svc)
                                     return
-                                if (root.setupPass.length < 4) {
-                                    root.setupError = "Use at least 4 characters."
+                                if (root.setupPass.length < 12) {
+                                    root.setupError = "Use at least 12 characters."
                                     return
                                 }
                                 if (root.setupPass !== root.setupConfirm) {
@@ -711,8 +711,8 @@ Panel {
                                         root.changeError = "Enter the current password or the back-up key."
                                         return
                                     }
-                                    if (root.changeNew.length < 4) {
-                                        root.changeError = "Use at least 4 characters."
+                                    if (root.changeNew.length < 12) {
+                                        root.changeError = "Use at least 12 characters."
                                         return
                                     }
                                     if (root.changeNew !== root.changeConfirm) {

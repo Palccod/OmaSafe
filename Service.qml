@@ -94,6 +94,9 @@ Item {
     readonly property string indexPath: vaultDir + "/index.enc"
     readonly property string prefsPath: stateHome + "/omarchy/plugins/palccod.omasafe.json"
     readonly property string exportDir: home + "/Downloads/OmaSafe"
+    readonly property int maxIndexBytes: 4 * 1024 * 1024
+    readonly property int maxIpcPayloadBytes: 256 * 1024
+    readonly property int maxVaultItems: 4096
 
     // --- the job queue --------------------------------------------------------
     //
@@ -255,7 +258,7 @@ Item {
     // --- initialization -------------------------------------------------------
 
     function initialize(password, onReady) {
-        if (root.phase !== "empty" || typeof password !== "string" || password.length < 4)
+        if (root.phase !== "empty" || typeof password !== "string" || password.length < 12)
             return false
         root.lastError = ""
         root.busyLabel = "Creating safe…"
@@ -553,6 +556,12 @@ Item {
                 root.phase = root.initialized ? "locked" : "empty"
                 return
             }
+            if (out.length > root.maxIndexBytes) {
+                root.sessionKey = ""
+                root.lastError = "The safe index is too large to open safely"
+                root.phase = root.initialized ? "locked" : "empty"
+                return
+            }
             let parsed = null
             try {
                 parsed = JSON.parse(out)
@@ -564,6 +573,8 @@ Item {
                     continue
                 if (typeof item.name !== "string" || item.name === "")
                     continue
+                if (clean.length >= root.maxVaultItems)
+                    break
                 clean.push({
                     id: item.id,
                     name: String(item.name),
@@ -640,11 +651,20 @@ Item {
             return 0
         }
         const paths = SafeModel.pathsFromEntries(entries)
+        const remaining = Math.max(0, root.maxVaultItems - root.itemCount)
+        if (remaining === 0) {
+            root._emitToast("The safe has reached its item limit")
+            return 0
+        }
         // A cap keeps one IPC call — from a drag or a local caller — from
         // queueing an unbounded pile of jobs against the running shell.
         if (paths.length > 50) {
             paths.length = 50
             root._emitToast("Locking the first 50 items — the rest were refused")
+        }
+        if (paths.length > remaining) {
+            paths.length = remaining
+            root._emitToast("Only " + remaining + " more items fit in this safe")
         }
         let queued = 0
         for (const path of paths) {
@@ -655,9 +675,15 @@ Item {
     }
 
     function _stashOne(path) {
-        const name = SafeModel.basename(path)
-        if (name === "" || name === "." || name === "..")
+        const rawName = SafeModel.basename(path)
+        const name = SafeModel.safeName(rawName)
+        // The archive root and manifest name must remain identical. Refuse a
+        // deceptive/control-bearing basename rather than silently renaming it
+        // and producing a directory archive that cannot later be extracted.
+        if (name === "" || name === "." || name === ".." || name !== rawName) {
+            root._emitToast("Skipped an item whose name contains unsupported characters")
             return false
+        }
         root.busyLabel = "Locking " + name + "…"
         // What kind of file is this? The script is a constant; only the path
         // travels as an argument.
@@ -855,7 +881,7 @@ Item {
     // back-up key. The old back-up key is overwritten out of existence; the
     // vault key itself never changes, so no blob is touched.
     function changePassword(oldSecret, newPassword) {
-        if (root.phase !== "unlocked" || typeof newPassword !== "string" || newPassword.length < 4)
+        if (root.phase !== "unlocked" || typeof newPassword !== "string" || newPassword.length < 12)
             return false
         const old = String(oldSecret || "")
         if (old.length === 0)
@@ -951,15 +977,20 @@ Item {
         // array is splatted by the IPC layer, an object survives intact.
         function stash(paths: string): string {
             let entries = null
+            const payload = String(paths)
+            if (payload.length > root.maxIpcPayloadBytes) {
+                root._emitToast("The stash request is too large")
+                return "0"
+            }
             try {
-                const parsed = JSON.parse(String(paths))
+                const parsed = JSON.parse(payload)
                 if (Array.isArray(parsed))
                     entries = parsed
                 else if (parsed && Array.isArray(parsed.paths))
                     entries = parsed.paths
             } catch (e) {}
             if (!entries)
-                entries = String(paths).split("\n")
+                entries = payload.split("\n")
             return String(root.stash(entries))
         }
     }

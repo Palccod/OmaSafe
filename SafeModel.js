@@ -56,7 +56,12 @@ function pathsFromEntries(entries) {
 // A stored item name is only ever a basename this plugin wrote itself,
 // but export paths are built from it, so it is re-validated on the way out.
 function safeName(name) {
-    let n = String(name || "").replace(/\//g, "_")
+    // Control characters and bidi overrides can make a stored name render as
+    // another file or inject terminal/UI controls. Keep ordinary Unicode but
+    // neutralize those controls and cap the value used by the UI and exports.
+    let n = String(name || "")
+        .replace(/[\/<>\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, "_")
+        .substring(0, 240)
     if (n === "" || n === "." || n === "..")
         n = "untitled"
     return n
