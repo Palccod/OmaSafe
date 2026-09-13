@@ -117,7 +117,7 @@ Panel {
     // is mid-job.
     property bool pointerHasVisited: false
     property bool dragOutActive: false
-    readonly property bool pointerOnCard: panel.hovered || button.hovered
+    readonly property bool pointerOnCard: !!panel.hovered || !!button.hovered
     readonly property bool autoCloseArmed: opened && pointerHasVisited
         && !pointerOnCard && !dragOutActive && !barDropActive
         && !deleteConfirmOpen && !(svc && svc.busy)
@@ -192,9 +192,13 @@ Panel {
 
         Text {
             anchors.centerIn: parent
+            width: parent.width
             text: root.barDropActive || root.cardDropActive ? root.glyphDrop
                 : root.unlocked ? root.glyphLockOpen
                 : root.glyphShield
+            textFormat: Text.PlainText
+            elide: Text.ElideRight
+            horizontalAlignment: Text.AlignHCenter
             color: root.barDropActive || root.cardDropActive || root.unlocked
                    ? Color.accent : button.foreground
             font.family: root.fontFamily
@@ -280,7 +284,10 @@ Panel {
                         Text {
                             anchors.left: parent.left
                             anchors.verticalCenter: parent.verticalCenter
+                            width: parent.width * 0.55
                             text: root.glyphShield + "  OmaSafe"
+                            textFormat: Text.PlainText
+                            elide: Text.ElideRight
                             color: root.foreground
                             font.family: root.fontFamily
                             font.pixelSize: Style.font.subtitle
@@ -295,9 +302,12 @@ Panel {
                             Text {
                                 anchors.verticalCenter: parent.verticalCenter
                                 visible: root.showContents
+                                width: Math.min(implicitWidth, Style.space(80))
                                 text: root.svc
                                     ? (root.svc.itemCount === 1 ? "1 item" : root.svc.itemCount + " items")
                                     : ""
+                                textFormat: Text.PlainText
+                                elide: Text.ElideRight
                                 color: Color.accent
                                 font.family: root.fontFamily
                                 font.pixelSize: Style.font.bodySmall
@@ -457,7 +467,10 @@ Panel {
                             spacing: Style.space(6)
 
                             Text {
+                                width: implicitWidth
                                 text: root.glyphKey
+                                textFormat: Text.PlainText
+                                elide: Text.ElideRight
                                 color: Color.accent
                                 font.family: root.fontFamily
                                 font.pixelSize: Style.font.heading
@@ -925,7 +938,11 @@ Panel {
                                     Text {
                                         anchors.centerIn: parent
                                         visible: thumb.status !== Image.Ready
+                                        width: parent.width
                                         text: rowDelegate.glyph
+                                        textFormat: Text.PlainText
+                                        elide: Text.ElideRight
+                                        horizontalAlignment: Text.AlignHCenter
                                         font.family: root.fontFamily
                                         font.pixelSize: Style.font.iconLarge
                                         color: Color.accent
@@ -1018,7 +1035,11 @@ Panel {
 
                             Text {
                                 anchors.horizontalCenter: parent.horizontalCenter
+                                width: parent.width
                                 text: root.glyphDrop
+                                textFormat: Text.PlainText
+                                elide: Text.ElideRight
+                                horizontalAlignment: Text.AlignHCenter
                                 color: Qt.alpha(root.foreground, 0.5)
                                 font.family: root.fontFamily
                                 font.pixelSize: Style.font.display
@@ -1039,6 +1060,7 @@ Panel {
                                 horizontalAlignment: Text.AlignHCenter
                                 text: "Drop files or folders here — or on the bar icon. Press a row and drag it anywhere to take it out."
                                 textFormat: Text.PlainText
+                                wrapMode: Text.WordWrap
                                 color: Qt.alpha(root.foreground, 0.55)
                                 font.family: root.fontFamily
                                 font.pixelSize: Style.font.bodySmall
@@ -1115,6 +1137,7 @@ Panel {
                             width: parent.width
                             text: "Press an item and drag it into any window to take a copy out."
                             textFormat: Text.PlainText
+                            elide: Text.ElideRight
                             color: Qt.alpha(root.foreground, 0.4)
                             font.family: root.fontFamily
                             font.pixelSize: Style.font.caption
@@ -1125,6 +1148,7 @@ Panel {
                             width: parent.width
                             text: "Drops while locked are refused — unlock first."
                             textFormat: Text.PlainText
+                            elide: Text.ElideRight
                             color: Qt.alpha(root.foreground, 0.4)
                             font.family: root.fontFamily
                             font.pixelSize: Style.font.caption
