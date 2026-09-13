@@ -1,0 +1,23 @@
+{
+  "schemaVersion": 1,
+  "id": "palccod.omasafe",
+  "name": "OmaSafe",
+  "version": "0.3.0",
+  "author": "palccod",
+  "license": "MIT",
+  "description": "Drag files into the safe — they get encrypted away and only come back with the password.",
+  "keywords": ["security", "files", "encryption", "privacy", "drag-and-drop"],
+  "kinds": ["service", "bar-widget"],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "Service.qml",
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaSafe",
+    "description": "An encrypted drop-safe for files and folders.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
