@@ -105,10 +105,22 @@ Item {
     property var _job: null
     // Item ids with a stage job in flight, so a press cannot double-queue.
     property var _staging: ({})
+    // Bumped by every lock(). Async pipelines capture the value when they
+    // start and abandon ship the moment it changes: without this, a lock
+    // landing mid-pipeline lets a late callback re-wrap metadata under a
+    // just-cleared (empty) key — openssl accepts an empty password, so the
+    // index would silently become readable by anyone.
+    property int _generation: 0
 
     function _enqueue(argv, env, done) {
         _queue.push({ argv: argv, env: env || ({}), done: done || null })
         _pump()
+    }
+
+    // True when `gen` was captured before the most recent lock — every
+    // callback that carries one must stop the moment this flips.
+    function _stale(gen) {
+        return gen !== root._generation
     }
 
     function _pump() {
@@ -172,6 +184,29 @@ Item {
             argv.push("-out", dst)
         argv.push("-pass", "env:" + passVar)
         return argv
+    }
+
+    // Critical metadata (wrap.enc, recovery.enc, index.enc) is never written
+    // in place: openssl encrypts into a hidden temp file in the same
+    // directory and a rename flips it over the live name. A crash can cost
+    // the new version, but a truncated or half-encrypted file can never be
+    // what survives under the live name. The temp must share the vault
+    // directory — a rename across filesystems (tmpfs scratch → disk) is a
+    // copy, not an atomic flip.
+    function _cipherAtomic(src, dstPath, passVar, env, done) {
+        const tmp = root.vaultDir + "/.tmp-" + SafeModel.basename(dstPath)
+        _enqueue(_cipherArgv(src, tmp, passVar, false), env, (code, out) => {
+            if (code !== 0) {
+                _enqueue(["rm", "-f", "--", tmp], {}, null)
+                if (done) done(false)
+                return
+            }
+            _enqueue(["mv", "-f", "--", tmp, dstPath], {}, (mc, mo) => {
+                if (mc !== 0)
+                    _enqueue(["rm", "-f", "--", tmp], {}, null)
+                if (done) done(mc === 0)
+            })
+        })
     }
 
     function _hexJob(bytes, done) {
@@ -272,9 +307,9 @@ Item {
                 // it is wrapped twice — once under the password, once under
                 // a freshly minted back-up key — then is gone.
                 _writeScratch("key", key, () => {
-                    _enqueue(_cipherArgv(root.scratchDir + "/key", root.wrapPath, "OS_PW", false),
-                             { OS_PW: password }, (c2, out2) => {
-                        if (c2 !== 0) {
+                    _cipherAtomic(root.scratchDir + "/key", root.wrapPath, "OS_PW",
+                                  { OS_PW: password }, ok2 => {
+                        if (!ok2) {
                             _rmScratch("key")
                             root.busyLabel = ""
                             root.lastError = "Could not create the safe"
@@ -287,10 +322,10 @@ Item {
                                 root.lastError = "Key generation failed"
                                 return
                             }
-                            _enqueue(_cipherArgv(root.scratchDir + "/key", root.recoveryPath, "OS_RK", false),
-                                     { OS_RK: rk }, (c3, out3) => {
+                            _cipherAtomic(root.scratchDir + "/key", root.recoveryPath, "OS_RK",
+                                          { OS_RK: rk }, ok3 => {
                                 _rmScratch("key")
-                                if (c3 !== 0) {
+                                if (!ok3) {
                                     root.busyLabel = ""
                                     root.lastError = "Could not create the safe"
                                     return
@@ -302,7 +337,13 @@ Item {
                                 // the safe locks again immediately after.
                                 root.sessionKey = key
                                 root.items = []
-                                _writeIndex(() => {
+                                _writeIndex(ok => {
+                                    if (!ok) {
+                                        root.busyLabel = ""
+                                        root.lastError = "Could not create the safe"
+                                        root.lock()
+                                        return
+                                    }
                                     root.initialized = true
                                     root.lock()
                                     if (onReady)
@@ -335,6 +376,9 @@ Item {
     // --- locking --------------------------------------------------------------
 
     function lock() {
+        // Everything queued against the old session dies with it; late
+        // callbacks check their captured generation and stop.
+        root._generation++
         root.sessionKey = ""
         root.items = []
         root.busyLabel = ""
@@ -353,9 +397,14 @@ Item {
     // the plaintext is on disk — Drag.startDrag() blocks until the drop lands,
     // so it must be the plain path by then.
 
-    function _stageDone(id, path, ok, name) {
+    function _stageDone(id, path, ok, name, gen) {
         delete root._staging[id]
         root.busyLabel = ""
+        // Locked mid-staging: the stage wipe is already queued behind this
+        // job, so recording the path would leave the chips pointing at a
+        // file that is about to be deleted.
+        if (gen !== undefined && root._stale(gen))
+            return
         if (!ok) {
             root._emitToast("Could not prepare " + name + " for dragging")
             return
@@ -378,9 +427,10 @@ Item {
             return true
         root._staging[item.id] = true
         root.busyLabel = "Preparing " + item.name + "…"
+        const gen = root._generation
         _enqueue(["sh", "-c", 'umask 077; mkdir -p -- "$1"', "omasafe-stage", root.stageDir], {}, (mc, mo) => {
             if (mc !== 0) {
-                _stageDone(item.id, "", false, item.name)
+                _stageDone(item.id, "", false, item.name, gen)
                 return
             }
             // A stage name that is not already taken, so two items that share
@@ -389,6 +439,10 @@ Item {
                       'n="$2"; base="$2"; ext=""; case "$2" in *.*) base="${2%.*}"; ext=".${2##*.}";; esac; '
                     + 'i=1; while [ -e "$1/$n" ] && [ "$i" -lt 50 ]; do i=$((i+1)); n="$base ($i)$ext"; done; printf "%s" "$n"',
                       "omasafe-stage-name", root.stageDir, SafeModel.safeName(item.name)], {}, (cc, co) => {
+                if (root._stale(gen)) {
+                    _stageDone(item.id, "", false, item.name, gen)
+                    return
+                }
                 const finalName = co.trim() || SafeModel.safeName(item.name)
                 const target = root.stageDir + "/" + finalName
                 const blobPath = root.vaultDir + "/" + item.id
@@ -397,7 +451,7 @@ Item {
                              { OS_KEY: root.sessionKey }, (dc, dOut) => {
                         if (dc !== 0) {
                             _rmScratch("item.tar")
-                            _stageDone(item.id, "", false, item.name)
+                            _stageDone(item.id, "", false, item.name, gen)
                             return
                         }
                         _enqueue(["rm", "-rf", "--", root.scratchDir + "/extract"], {}, () => {
@@ -406,13 +460,13 @@ Item {
                                           root.scratchDir + "/item.tar"], {}, (xc, xo) => {
                                     _rmScratch("item.tar")
                                     if (xc !== 0) {
-                                        _stageDone(item.id, "", false, item.name)
+                                        _stageDone(item.id, "", false, item.name, gen)
                                         return
                                     }
                                     _enqueue(["mv", "--", root.scratchDir + "/extract/" + SafeModel.safeName(item.name),
                                               target], {}, (vc, vo) => {
                                         _enqueue(["rm", "-rf", "--", root.scratchDir + "/extract"], {}, () => {})
-                                        _stageDone(item.id, target, vc === 0, item.name)
+                                        _stageDone(item.id, target, vc === 0, item.name, gen)
                                     })
                                 })
                             })
@@ -421,7 +475,7 @@ Item {
                 } else {
                     _enqueue(_cipherArgv(blobPath, target, "OS_KEY", true),
                              { OS_KEY: root.sessionKey }, (dc, do2) => {
-                        _stageDone(item.id, target, dc === 0, item.name)
+                        _stageDone(item.id, target, dc === 0, item.name, gen)
                     })
                 }
             })
@@ -478,7 +532,9 @@ Item {
     Timer {
         id: autoLockTimer
         interval: Math.max(1, root.autoLockSeconds) * 1000
-        onTriggered: root.lock()
+        // Never yank the key out from under a running job: wait it out and
+        // lock the moment the queue goes quiet.
+        onTriggered: root.busy ? autoLockTimer.restart() : root.lock()
     }
 
     // One field takes both secrets: try the password first; a string that is
@@ -491,14 +547,17 @@ Item {
             return false
         root.lastError = ""
         root.busyLabel = "Unlocking…"
+        const gen = root._generation
         _enqueue(_cipherArgv(root.wrapPath, "", "OS_PW", true), { OS_PW: attempt }, (code, out) => {
+            if (root._stale(gen))
+                return
             // Decrypt to stdout: no -out argument, so the plaintext key comes
             // back through the pipe and never touches the disk.
             const key = out.trim()
             if (code !== 0 || !SafeModel.isHex64(key)) {
                 const backup = SafeModel.normalizeKey(attempt)
                 if (SafeModel.isHex64(backup)) {
-                    _unlockWithKey(backup)
+                    _unlockWithKey(backup, gen)
                 } else {
                     root.busyLabel = ""
                     root.lastError = "Wrong password"
@@ -515,10 +574,14 @@ Item {
     // A 64-hex secret: on current safes it unwraps recovery.enc; on safes
     // from before that file existed, the key *was* the vault key, so the
     // index is opened with it directly and the safe is upgraded right after.
-    function _unlockWithKey(key) {
+    function _unlockWithKey(key, gen) {
         _exists(root.recoveryPath, has => {
+            if (root._stale(gen))
+                return
             if (has) {
                 _enqueue(_cipherArgv(root.recoveryPath, "", "OS_RK", true), { OS_RK: key }, (code, out) => {
+                    if (root._stale(gen))
+                        return
                     const vk = out.trim()
                     if (code !== 0 || !SafeModel.isHex64(vk)) {
                         root.busyLabel = ""
@@ -532,6 +595,8 @@ Item {
                 return
             }
             _enqueue(_cipherArgv(root.indexPath, "", "OS_KEY", true), { OS_KEY: key }, (code, out) => {
+                if (root._stale(gen))
+                    return
                 if (code !== 0) {
                     root.busyLabel = ""
                     root.lastError = "Back-up key does not fit this safe"
@@ -545,7 +610,10 @@ Item {
     }
 
     function _loadIndex() {
+        const gen = root._generation
         _enqueue(_cipherArgv(root.indexPath, "", "OS_KEY", true), { OS_KEY: root.sessionKey }, (code, out) => {
+            if (root._stale(gen))
+                return
             root.busyLabel = ""
             if (code !== 0) {
                 root.sessionKey = ""
@@ -585,8 +653,9 @@ Item {
     // refuse the raw vault key — the old key is dead as far as the safe is
     // concerned. No blob is touched: the vault key does not change.
     function _ensureRecovery() {
+        const gen = root._generation
         _exists(root.recoveryPath, has => {
-            if (has)
+            if (root._stale(gen) || !has)
                 return
             root.busyLabel = "Upgrading the safe…"
             _hexJob(32, rk => {
@@ -595,12 +664,25 @@ Item {
                     root._emitToast("Could not issue a back-up key — try locking and unlocking again")
                     return
                 }
+                // Locked mid-upgrade: wrapping the now-empty session key
+                // would replace recovery.enc with garbage the user can never
+                // decrypt. The next unlock retries the upgrade instead.
+                if (root._stale(gen) || !SafeModel.isHex64(root.sessionKey)) {
+                    root.busyLabel = ""
+                    return
+                }
                 _writeScratch("vkey", root.sessionKey, () => {
-                    _enqueue(_cipherArgv(root.scratchDir + "/vkey", root.recoveryPath, "OS_RK", false),
-                             { OS_RK: rk }, (code, out) => {
+                    // Env for the wrap below is captured here — re-check.
+                    if (root._stale(gen) || !SafeModel.isHex64(root.sessionKey)) {
                         _rmScratch("vkey")
                         root.busyLabel = ""
-                        if (code !== 0) {
+                        return
+                    }
+                    _cipherAtomic(root.scratchDir + "/vkey", root.recoveryPath, "OS_RK",
+                                  { OS_RK: rk }, ok => {
+                        _rmScratch("vkey")
+                        root.busyLabel = ""
+                        if (!ok) {
                             root._emitToast("Could not issue a back-up key — try locking and unlocking again")
                             return
                         }
@@ -615,15 +697,40 @@ Item {
     // Re-encrypts the manifest from the in-memory list. The queue makes this
     // race-free: only one job touches index.enc at a time.
     function _writeIndex(done) {
+        // Last-ditch invariant: a locked (or half-locked) safe must never
+        // rewrite the manifest — openssl would happily encrypt it under an
+        // empty password. Callers guard this with the generation; this is
+        // the backstop that makes the invariant impossible to violate.
+        if (!SafeModel.isHex64(root.sessionKey)) {
+            if (done)
+                done(false)
+            return
+        }
+        const gen = root._generation
         const json = JSON.stringify({ version: 1, items: root.items })
         _writeScratch("index.json", json, () => {
-            _enqueue(_cipherArgv(root.scratchDir + "/index.json", root.indexPath, "OS_KEY", false),
-                     { OS_KEY: root.sessionKey }, (code, out) => {
+            // The env below is captured at this exact moment, so the guard
+            // has to sit here too — a lock that landed while the scratch
+            // write ran left sessionKey empty, and the check above the
+            // scratch write is already stale history.
+            if (root._stale(gen) || !SafeModel.isHex64(root.sessionKey)) {
                 _rmScratch("index.json")
-                if (code !== 0)
+                if (done)
+                    done(false)
+                return
+            }
+            _cipherAtomic(root.scratchDir + "/index.json", root.indexPath, "OS_KEY",
+                          { OS_KEY: root.sessionKey }, (ok) => {
+                _rmScratch("index.json")
+                if (root._stale(gen)) {
+                    if (done)
+                        done(false)
+                    return
+                }
+                if (!ok)
                     root._emitToast("Could not update the safe's index")
                 if (done)
-                    done(code === 0)
+                    done(ok)
             })
         })
     }
@@ -659,6 +766,7 @@ Item {
         if (name === "" || name === "." || name === "..")
             return false
         root.busyLabel = "Locking " + name + "…"
+        const gen = root._generation
         // What kind of file is this? The script is a constant; only the path
         // travels as an argument.
         _enqueue(["sh", "-c",
@@ -666,6 +774,8 @@ Item {
                 + 'elif [ -f "$1" ]; then echo "file $(stat -c %s -- "$1")"; '
                 + 'else echo missing; fi',
                   "omasafe-stat", path], {}, (code, out) => {
+            if (root._stale(gen))
+                return
             const answer = out.trim().split(" ")
             const kind = answer[0]
             const size = answer.length > 1 ? SafeModel.clampInt(answer[1], 0, 0, Number.MAX_SAFE_INTEGER) : 0
@@ -680,6 +790,10 @@ Item {
                     root._emitToast("Could not lock " + name)
                     return
                 }
+                if (root._stale(gen)) {
+                    root.busyLabel = ""
+                    return
+                }
                 const blobPath = root.vaultDir + "/" + id
                 if (kind === "dir") {
                     // Folders travel as a tar stream: one blob per item keeps
@@ -691,6 +805,11 @@ Item {
                             root._emitToast("Could not read " + name)
                             return
                         }
+                        if (root._stale(gen)) {
+                            _rmScratch("item.tar")
+                            root.busyLabel = ""
+                            return
+                        }
                         _enqueue(_cipherArgv(root.scratchDir + "/item.tar", blobPath, "OS_KEY", false),
                                  { OS_KEY: root.sessionKey }, (ec, eo) => {
                             _rmScratch("item.tar")
@@ -699,7 +818,7 @@ Item {
                                 root._emitToast("Could not lock " + name)
                                 return
                             }
-                            _stashCommit(id, name, true, size, path)
+                            _stashCommit(id, name, true, size, path, gen)
                         })
                     })
                 } else {
@@ -710,7 +829,7 @@ Item {
                             root._emitToast("Could not lock " + name)
                             return
                         }
-                        _stashCommit(id, name, false, size, path)
+                        _stashCommit(id, name, false, size, path, gen)
                     })
                 }
             })
@@ -719,8 +838,16 @@ Item {
     }
 
     // Blob written and verified by openssl's exit code: record it in the
-    // index, then — and only then — remove the original.
-    function _stashCommit(id, name, isDir, size, originalPath) {
+    // index, then — and only then — remove the original. A lock that landed
+    // mid-pipeline stops here: the blob survives as an unindexed orphan
+    // (harmless), the original stays on disk, and nothing is rewritten
+    // under an empty key.
+    function _stashCommit(id, name, isDir, size, originalPath, gen) {
+        if (root._stale(gen)) {
+            root.busyLabel = ""
+            root._emitToast("The safe locked before " + name + " was recorded — nothing was deleted")
+            return
+        }
         const entry = { id: id, name: name, isDir: isDir, size: size, addedAt: Date.now() }
         const list = root.items.slice()
         list.push(entry)
@@ -751,6 +878,7 @@ Item {
             return
         const item = root.items[index]
         root.busyLabel = "Unlocking " + item.name + "…"
+        const gen = root._generation
         _enqueue(["sh", "-c", 'mkdir -p -- "$1"', "omasafe-export", root.exportDir], {}, (mc, mo) => {
             if (mc !== 0) {
                 root.busyLabel = ""
@@ -763,6 +891,12 @@ Item {
                       'n="$2"; base="$2"; ext=""; case "$2" in *.*) base="${2%.*}"; ext=".${2##*.}";; esac; '
                     + 'i=1; while [ -e "$1/$n" ] && [ "$i" -lt 50 ]; do i=$((i+1)); n="$base ($i)$ext"; done; printf "%s" "$n"',
                       "omasafe-collision", root.exportDir, SafeModel.safeName(item.name)], {}, (cc, co) => {
+                // Everything below decrypts with the session key; a safe that
+                // locked meanwhile must not decrypt garbage into Downloads.
+                if (root._stale(gen)) {
+                    root.busyLabel = ""
+                    return
+                }
                 const finalName = co.trim() || SafeModel.safeName(item.name)
                 const blobPath = root.vaultDir + "/" + item.id
                 if (item.isDir) {
@@ -836,7 +970,13 @@ Item {
             return
         const item = root.items[index]
         root.busyLabel = "Destroying " + item.name + "…"
+        const gen = root._generation
         _enqueue(["rm", "-f", "--", root.vaultDir + "/" + item.id], {}, (code, out) => {
+            if (root._stale(gen)) {
+                root.busyLabel = ""
+                root._emitToast("The safe locked before " + item.name + " was destroyed — it is still in the safe")
+                return
+            }
             const list = root.items.slice()
             const i = root.items.indexOf(item)
             if (i !== -1)
@@ -862,13 +1002,16 @@ Item {
             return false
         root.lastError = ""
         root.busyLabel = "Changing password…"
+        const gen = root._generation
         const fail = () => {
             root.busyLabel = ""
             root.lastError = "The current password or back-up key is wrong"
         }
         _enqueue(_cipherArgv(root.wrapPath, "", "OS_OLD", true), { OS_OLD: old }, (code, out) => {
+            if (root._stale(gen))
+                return
             if (code === 0 && out.trim() === root.sessionKey) {
-                root._rotateSecrets(newPassword)
+                root._rotateSecrets(newPassword, gen)
                 return
             }
             const rk = SafeModel.normalizeKey(old)
@@ -877,17 +1020,19 @@ Item {
                 return
             }
             _enqueue(_cipherArgv(root.recoveryPath, "", "OS_RK", true), { OS_RK: rk }, (code2, out2) => {
+                if (root._stale(gen))
+                    return
                 if (code2 !== 0 || out2.trim() !== root.sessionKey) {
                     fail()
                     return
                 }
-                root._rotateSecrets(newPassword)
+                root._rotateSecrets(newPassword, gen)
             })
         })
         return true
     }
 
-    function _rotateSecrets(newPassword) {
+    function _rotateSecrets(newPassword, gen) {
         const done = () => {
             root.busyLabel = ""
         }
@@ -897,20 +1042,36 @@ Item {
                 root._emitToast("Could not issue a new back-up key — nothing was changed")
                 return
             }
+            // The guard that matters most in this file: re-wrapping the
+            // session key after a lock would encrypt an empty string under
+            // the new password and the new back-up key — both wraps dead,
+            // the vault key gone. Never rotate without a live key.
+            if (root._stale(gen) || !SafeModel.isHex64(root.sessionKey)) {
+                done()
+                root._emitToast("The safe locked — the password was not changed")
+                return
+            }
             _writeScratch("vkey", root.sessionKey, () => {
-                _enqueue(_cipherArgv(root.scratchDir + "/vkey", root.wrapPath, "OS_PW", false),
-                         { OS_PW: newPassword }, (code1, out1) => {
-                    if (code1 !== 0) {
+                // Env for both wraps below is captured here — re-check.
+                if (root._stale(gen) || !SafeModel.isHex64(root.sessionKey)) {
+                    _rmScratch("vkey")
+                    done()
+                    root._emitToast("The safe locked — the password was not changed")
+                    return
+                }
+                _cipherAtomic(root.scratchDir + "/vkey", root.wrapPath, "OS_PW",
+                              { OS_PW: newPassword }, ok1 => {
+                    if (!ok1) {
                         _rmScratch("vkey")
                         done()
                         root._emitToast("Could not change the password — nothing was changed")
                         return
                     }
-                    _enqueue(_cipherArgv(root.scratchDir + "/vkey", root.recoveryPath, "OS_RK", false),
-                             { OS_RK: rk }, (code2, out2) => {
+                    _cipherAtomic(root.scratchDir + "/vkey", root.recoveryPath, "OS_RK",
+                                  { OS_RK: rk }, ok2 => {
                         _rmScratch("vkey")
                         done()
-                        if (code2 !== 0) {
+                        if (!ok2) {
                             root._emitToast("The password changed, but no new back-up key could be issued")
                             return
                         }
