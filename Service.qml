@@ -666,7 +666,11 @@ Item {
     function _ensureRecovery() {
         const gen = root._generation
         _exists(root.recoveryPath, has => {
-            if (root._stale(gen) || !has)
+            // A present recovery.enc means the safe is already upgraded; the
+            // upgrade may only run when it is missing. Running it anyway would
+            // re-mint the back-up key on every unlock, silently killing the
+            // copy the user saved.
+            if (root._stale(gen) || has)
                 return
             root.busyLabel = "Upgrading the safe…"
             _hexJob(32, rk => {
