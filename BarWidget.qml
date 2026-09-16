@@ -1289,6 +1289,8 @@ Panel {
                                         ? (root.svc ? SafeModel.childrenOf(root.svc.items, modelData.path).length : 0) : 0
                                     readonly property string stagePath: !!root.svc && root.svc.staged && root.svc.staged[modelData.path]
                                         ? String(root.svc.staged[modelData.path].path) : ""
+                                    readonly property url thumbUrl: tileDelegate.stagePath !== "" && SafeModel.isImage(tileDelegate.name)
+                                        ? SafeModel.urlFromPath(tileDelegate.stagePath) : ""
                                     property bool folderHover: false
 
                                     width: (parent.width - Style.space(16)) / 3
@@ -1342,7 +1344,7 @@ Panel {
                                     property url dragImage: ""
 
                                     function refreshDragImage() {
-                                        tileIcon.grabToImage(function (result) {
+                                        tileThumbBox.grabToImage(function (result) {
                                             tileDelegate.dragImage = result.url
                                         }, Qt.size(Style.space(44), Style.space(44)))
                                     }
@@ -1420,13 +1422,31 @@ Panel {
                                         anchors.margins: Style.space(6)
                                         spacing: Style.space(2)
 
-                                        Item {
-                                            width: parent.width
+                                        Rectangle {
+                                            id: tileThumbBox
+                                            width: Style.space(40)
                                             height: Style.space(40)
+                                            anchors.horizontalCenter: parent.horizontalCenter
+                                            radius: Math.min(Style.cornerRadius, Style.space(6))
+                                            clip: true
+                                            color: tileThumb.status === Image.Ready ? "transparent" : Qt.alpha(root.foreground, 0.06)
+
+                                            Image {
+                                                id: tileThumb
+                                                anchors.fill: parent
+                                                visible: status === Image.Ready
+                                                source: tileDelegate.thumbUrl
+                                                asynchronous: true
+                                                cache: false
+                                                fillMode: Image.PreserveAspectCrop
+                                                sourceSize.width: Style.space(80)
+                                                sourceSize.height: Style.space(80)
+                                            }
 
                                             Text {
                                                 id: tileIcon
                                                 anchors.centerIn: parent
+                                                visible: tileThumb.status !== Image.Ready
                                                 text: tileDelegate.glyph
                                                 textFormat: Text.PlainText
                                                 elide: Text.ElideRight
