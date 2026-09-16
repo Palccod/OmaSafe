@@ -39,6 +39,10 @@ Panel {
     readonly property string glyphTrash: "\u{F01B4}"         // nf-md-delete
     readonly property string glyphClose: "\u{F0156}"         // nf-md-close
     readonly property string glyphCheck: "\u{F00EC}"         // nf-md-check
+    readonly property string glyphFolderOpen: "\u{F0770}"    // nf-md-folder-open
+    readonly property string glyphChevronLeft: "\u{F0142}"   // nf-md-chevron-left
+    readonly property string glyphGrid: "\u{F0238}"          // nf-md-view-grid
+    readonly property string glyphList: "\u{F0239}"          // nf-md-view-list
 
     // Which card to show is derived state — the service is the only source
     // of truth, so a lock from IPC or the timer lands the card back on the
@@ -55,7 +59,8 @@ Panel {
     property bool barDropActive: false
     property string toastText: ""
     property bool deleteConfirmOpen: false
-    property int deleteIndex: -1
+    property string deletePath: ""
+    property bool gridMode: false
     property string setupError: ""
     property string unlockText: ""
     property string setupPass: ""
@@ -165,8 +170,8 @@ Panel {
         root.showToast("Back-up key copied")
     }
 
-    function requestDelete(index) {
-        root.deleteIndex = index
+    function requestDelete(path) {
+        root.deletePath = String(path || "")
         root.deleteConfirmOpen = true
     }
 
@@ -231,7 +236,7 @@ Panel {
                 const entries = drop.hasUrls ? drop.urls : String(drop.text).split("\n")
                 if (root.svc.phase !== "unlocked")
                     root.open()
-                root.svc.stash(entries)
+                root.svc.stash(entries, root.svc.currentFolder)
                 if (drop.hasUrls)
                     drop.accept(Qt.CopyAction)
             }
@@ -260,6 +265,37 @@ Panel {
                     return
                 }
                 root.close()
+            }
+
+            // The whole card is a drop target while the safe is open. It sits
+            // BELOW the flick content in stacking order, so folder rows and
+            // tiles catch their own drops first; whatever misses them lands
+            // in the folder the card is browsing. A highlighted border is
+            // the only feedback a hovering drag gets.
+            DropArea {
+                anchors.fill: parent
+
+                onEntered: drag => {
+                    if (!drag.hasUrls && !drag.hasText)
+                        return
+                    drag.accept(Qt.CopyAction)
+                    root.cardDropActive = true
+                }
+
+                onExited: root.cardDropActive = false
+
+                onDropped: drop => {
+                    root.cardDropActive = false
+                    if (!root.svc)
+                        return
+                    const entries = drop.hasUrls ? drop.urls : String(drop.text).split("\n")
+                    if (root.svc.phase !== "unlocked")
+                        root.showToast("Unlock the safe before adding files")
+                    else
+                        root.svc.stash(entries, root.svc.currentFolder)
+                    if (drop.hasUrls)
+                        drop.accept(Qt.CopyAction)
+                }
             }
 
             Flickable {
@@ -649,7 +685,7 @@ Panel {
                         TextField {
                             width: parent.width
                             password: true
-                            placeholderText: "New password (4+ characters)"
+                            placeholderText: "New password (12+ characters)"
                             foreground: root.foreground
                             font.family: root.fontFamily
                             text: root.changeNew
@@ -792,9 +828,74 @@ Panel {
                             }
                         }
 
-                        // Items
+                        // Toolbar: breadcrumbs on the left, layout toggle on
+                        // the right.
+                        Item {
+                            visible: root.showContents
+                            width: parent.width
+                            height: Style.space(26)
+
+                            Row {
+                                id: crumbs
+                                anchors.left: parent.left
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: Style.space(2)
+
+                                PanelActionButton {
+                                    visible: !!root.svc && root.svc.currentFolder !== "/"
+                                    iconText: root.glyphChevronLeft
+                                    tooltipText: "Up one folder"
+                                    foreground: root.foreground
+                                    fontFamily: root.fontFamily
+                                    onClicked: if (root.svc)
+                                        root.svc.navigate(SafeModel.parentOf(root.svc.currentFolder))
+                                }
+
+                                Repeater {
+                                    model: root.svc ? SafeModel.pathSegments(root.svc.currentFolder) : []
+
+                                    delegate: Text {
+                                        id: crumb
+                                        required property int index
+                                        required property var modelData
+
+                                        anchors.verticalCenter: parent.verticalCenter
+                                        width: Math.min(implicitWidth, Style.space(90))
+                                        text: (index === 0 ? "" : " / ") + (modelData.name === "" ? "safe" : modelData.name)
+                                        textFormat: Text.PlainText
+                                        elide: Text.ElideMiddle
+                                        color: !!root.svc && modelData.path === root.svc.currentFolder
+                                               ? Color.accent : Qt.alpha(root.foreground, 0.6)
+                                        font.family: root.fontFamily
+                                        font.pixelSize: Style.font.bodySmall
+                                        font.bold: !!root.svc && modelData.path === root.svc.currentFolder
+
+                                        TapHandler {
+                                            onTapped: if (root.svc) root.svc.navigate(crumb.modelData.path)
+                                        }
+                                    }
+                                }
+                            }
+
+                            PanelActionButton {
+                                anchors.right: parent.right
+                                anchors.verticalCenter: parent.verticalCenter
+                                iconText: root.gridMode ? root.glyphList : root.glyphGrid
+                                tooltipText: root.gridMode ? "List view" : "Grid view"
+                                foreground: root.foreground
+                                fontFamily: root.fontFamily
+                                onClicked: root.gridMode = !root.gridMode
+                            }
+                        }
+
+                        // Items — list view
+                        Column {
+                            visible: root.showContents && !root.gridMode
+                            width: parent.width
+                            spacing: Style.space(8)
+
                         Repeater {
-                            model: root.svc ? root.svc.items : []
+                            model: root.svc ? root.svc.visibleItems : []
 
                             delegate: Rectangle {
                                 id: rowDelegate
@@ -802,27 +903,65 @@ Panel {
                                 required property int index
                                 required property var modelData
 
-                                readonly property string name: SafeModel.safeName(modelData.name)
-                                readonly property string glyph: SafeModel.itemGlyph(modelData.name, modelData.isDir)
-                                readonly property string ext: SafeModel.extOf(modelData.name)
+                                readonly property string name: SafeModel.baseNameOf(modelData.path)
+                                readonly property bool isFolder: modelData.isDir === true
+                                // A pre-0.4.0 tar folder: extractable and
+                                // draggable, but not browsable until the
+                                // service's one-time upgrade explodes it.
+                                readonly property bool browsable: rowDelegate.isFolder && modelData.legacy !== true
+                                readonly property string glyph: SafeModel.itemGlyph(rowDelegate.name, modelData.isDir)
+                                readonly property string ext: SafeModel.extOf(rowDelegate.name)
                                 readonly property string kindLabel: modelData.isDir
                                     ? "FOLDER" : (rowDelegate.ext !== "" ? rowDelegate.ext.toUpperCase() : "FILE")
+                                readonly property int childCount: rowDelegate.isFolder
+                                    ? (root.svc ? SafeModel.childrenOf(root.svc.items, modelData.path).length : 0) : 0
                                 // Plaintext staged for a drag-out (and for the
                                 // thumbnail): decrypted on hover or press.
-                                readonly property string stagePath: !!root.svc && root.svc.staged && root.svc.staged[modelData.id]
-                                    ? String(root.svc.staged[modelData.id].path) : ""
-                                readonly property url thumbUrl: rowDelegate.stagePath !== "" && SafeModel.isImage(modelData.name)
+                                readonly property string stagePath: !!root.svc && root.svc.staged && root.svc.staged[modelData.path]
+                                    ? String(root.svc.staged[modelData.path].path) : ""
+                                readonly property url thumbUrl: rowDelegate.stagePath !== "" && SafeModel.isImage(rowDelegate.name)
                                     ? SafeModel.urlFromPath(rowDelegate.stagePath) : ""
+                                // Highlight while a dragged payload hovers a
+                                // folder: that drop lands inside it.
+                                property bool folderHover: false
 
                                 width: parent.width
                                 implicitHeight: Style.space(56)
                                 radius: Math.min(Style.cornerRadius, Style.space(8))
-                                color: rowHover.hovered ? Qt.alpha(root.foreground, 0.07) : Qt.alpha(root.foreground, 0.035)
+                                color: rowDelegate.folderHover || rowHover.hovered ? Qt.alpha(root.foreground, 0.07) : Qt.alpha(root.foreground, 0.035)
                                 border.width: 1
-                                border.color: rowHover.hovered ? Qt.alpha(Color.accent, 0.55) : "transparent"
+                                border.color: rowDelegate.folderHover
+                                    ? Color.accent
+                                    : (rowHover.hovered ? Qt.alpha(Color.accent, 0.55) : "transparent")
 
                                 Behavior on color {
                                     ColorAnimation { duration: 90 }
+                                }
+
+                                // Dropping onto a folder row files the payload
+                                // into that folder instead of the open one.
+                                DropArea {
+                                    anchors.fill: parent
+                                    enabled: rowDelegate.browsable
+
+                                    onEntered: drag => {
+                                        if (!drag.hasUrls && !drag.hasText)
+                                            return
+                                        drag.accept(Qt.CopyAction)
+                                        rowDelegate.folderHover = true
+                                    }
+
+                                    onExited: rowDelegate.folderHover = false
+
+                                    onDropped: drop => {
+                                        rowDelegate.folderHover = false
+                                        if (!root.svc)
+                                            return
+                                        const entries = drop.hasUrls ? drop.urls : String(drop.text).split("\n")
+                                        root.svc.stash(entries, rowDelegate.modelData.path)
+                                        if (drop.hasUrls)
+                                            drop.accept(Qt.CopyAction)
+                                    }
                                 }
 
                                 // Native drag-out, copied from the ledge: the
@@ -862,7 +1001,7 @@ Panel {
 
                                 HoverHandler {
                                     id: rowHover
-                                    cursorShape: Qt.OpenHandCursor
+                                    cursorShape: rowDelegate.browsable ? Qt.PointingHandCursor : Qt.OpenHandCursor
                                     onHoveredChanged: if (hovered) {
                                         rowDelegate.refreshDragImage()
                                         // Stage on hover, ledge-style: by the
@@ -870,7 +1009,7 @@ Panel {
                                         // plaintext is usually already on disk,
                                         // and image chips get their thumbnail.
                                         if (root.svc)
-                                            root.svc.stageItem(rowDelegate.index)
+                                            root.svc.stageItem(rowDelegate.modelData.path)
                                     }
                                 }
 
@@ -890,9 +1029,8 @@ Panel {
                                         pressPoint = Qt.point(mouse.x, mouse.y)
                                         dragging = false
                                         rowDelegate.refreshDragImage()
-                                        console.log("omasafe: row press, staging", rowDelegate.name)
                                         if (root.svc)
-                                            root.svc.stageItem(rowDelegate.index)
+                                            root.svc.stageItem(rowDelegate.modelData.path)
                                     }
 
                                     onPositionChanged: mouse => {
@@ -907,8 +1045,11 @@ Panel {
                                     }
 
                                     onClicked: mouse => {
-                                        // A plain click is intentionally inert —
-                                        // extract and destroy live on the buttons.
+                                        // A click opens a folder; files stay
+                                        // inert — extract and destroy live on
+                                        // the buttons.
+                                        if (rowDelegate.browsable && root.svc)
+                                            root.svc.navigate(rowDelegate.modelData.path)
                                     }
                                 }
 
@@ -975,8 +1116,13 @@ Panel {
                                             if (rowHover.hovered)
                                                 return rowDelegate.stagePath !== ""
                                                     ? "drag · release over a window to copy"
-                                                    : "decrypting…"
-                                            const size = modelData.isDir ? "" : " · " + SafeModel.humanSize(modelData.size)
+                                                    : (rowDelegate.browsable
+                                                        ? "click to open · drop files to add inside"
+                                                        : "decrypting…")
+                                            if (modelData.isDir)
+                                                return rowDelegate.childCount === 1
+                                                    ? "1 item" : rowDelegate.childCount + " items"
+                                            const size = " · " + SafeModel.humanSize(modelData.size)
                                             return rowDelegate.kindLabel + size
                                         }
                                         color: rowHover.hovered ? Color.accent : Qt.alpha(root.foreground, 0.5)
@@ -1005,7 +1151,7 @@ Panel {
                                         foreground: root.foreground
                                         fontFamily: root.fontFamily
                                         enabled: !root.svc || !root.svc.busy
-                                        onClicked: root.svc.extractAt(rowDelegate.index)
+                                        onClicked: root.svc.extractAt(rowDelegate.modelData.path)
                                     }
 
                                     PanelActionButton {
@@ -1016,15 +1162,235 @@ Panel {
                                         hoverColor: Color.urgent
                                         fontFamily: root.fontFamily
                                         enabled: !root.svc || !root.svc.busy
-                                        onClicked: root.requestDelete(rowDelegate.index)
+                                        onClicked: root.requestDelete(rowDelegate.modelData.path)
+                                    }
+                                }
+                            }
+                        }
+                        }
+
+                        // Items — grid view
+                        Grid {
+                            visible: root.showContents && root.gridMode
+                            width: parent.width
+                            columns: 3
+                            columnSpacing: Style.space(8)
+                            rowSpacing: Style.space(8)
+
+                            Repeater {
+                                model: root.svc ? root.svc.visibleItems : []
+
+                                delegate: Rectangle {
+                                    id: tileDelegate
+
+                                    required property int index
+                                    required property var modelData
+
+                                    readonly property string name: SafeModel.baseNameOf(modelData.path)
+                                    readonly property bool isFolder: modelData.isDir === true
+                                    readonly property bool browsable: tileDelegate.isFolder && modelData.legacy !== true
+                                    readonly property string glyph: SafeModel.itemGlyph(tileDelegate.name, modelData.isDir)
+                                    readonly property int childCount: tileDelegate.isFolder
+                                        ? (root.svc ? SafeModel.childrenOf(root.svc.items, modelData.path).length : 0) : 0
+                                    readonly property string stagePath: !!root.svc && root.svc.staged && root.svc.staged[modelData.path]
+                                        ? String(root.svc.staged[modelData.path].path) : ""
+                                    property bool folderHover: false
+
+                                    width: (parent.width - Style.space(16)) / 3
+                                    height: Style.space(84)
+                                    radius: Math.min(Style.cornerRadius, Style.space(8))
+                                    color: tileDelegate.folderHover || tileHover.hovered ? Qt.alpha(root.foreground, 0.07) : Qt.alpha(root.foreground, 0.035)
+                                    border.width: 1
+                                    border.color: tileDelegate.folderHover
+                                        ? Color.accent
+                                        : (tileHover.hovered ? Qt.alpha(Color.accent, 0.55) : "transparent")
+
+                                    Behavior on color {
+                                        ColorAnimation { duration: 90 }
+                                    }
+
+                                    DropArea {
+                                        anchors.fill: parent
+                                        enabled: tileDelegate.browsable
+
+                                        onEntered: drag => {
+                                            if (!drag.hasUrls && !drag.hasText)
+                                                return
+                                            drag.accept(Qt.CopyAction)
+                                            tileDelegate.folderHover = true
+                                        }
+
+                                        onExited: tileDelegate.folderHover = false
+
+                                        onDropped: drop => {
+                                            tileDelegate.folderHover = false
+                                            if (!root.svc)
+                                                return
+                                            const entries = drop.hasUrls ? drop.urls : String(drop.text).split("\n")
+                                            root.svc.stash(entries, tileDelegate.modelData.path)
+                                            if (drop.hasUrls)
+                                                drop.accept(Qt.CopyAction)
+                                        }
+                                    }
+
+                                    Drag.dragType: Drag.Automatic
+                                    Drag.supportedActions: Qt.CopyAction
+                                    Drag.proposedAction: Qt.CopyAction
+                                    Drag.mimeData: tileDelegate.stagePath !== ""
+                                        ? ({ "text/uri-list": SafeModel.uriList([tileDelegate.stagePath]),
+                                             "text/plain": tileDelegate.stagePath })
+                                        : ({})
+                                    Drag.imageSource: tileDelegate.dragImage
+
+                                    property url dragImage: ""
+
+                                    function refreshDragImage() {
+                                        tileIcon.grabToImage(function (result) {
+                                            tileDelegate.dragImage = result.url
+                                        }, Qt.size(Style.space(44), Style.space(44)))
+                                    }
+
+                                    function beginDrag() {
+                                        if (tileDelegate.stagePath === "")
+                                            return
+                                        root.dragOutActive = true
+                                        tileDelegate.Drag.active = true
+                                        tileDelegate.Drag.startDrag(Qt.CopyAction)
+                                        if (tileDelegate.Drag.active)
+                                            tileDelegate.Drag.active = false
+                                        root.dragOutActive = false
+                                    }
+
+                                    HoverHandler {
+                                        id: tileHover
+                                        cursorShape: tileDelegate.browsable ? Qt.PointingHandCursor : Qt.OpenHandCursor
+                                        onHoveredChanged: if (hovered) {
+                                            tileDelegate.refreshDragImage()
+                                            if (root.svc)
+                                                root.svc.stageItem(tileDelegate.modelData.path)
+                                        }
+                                    }
+
+                                    MouseArea {
+                                        anchors.fill: parent
+                                        acceptedButtons: Qt.LeftButton
+                                        preventStealing: true
+
+                                        property point pressPoint: Qt.point(0, 0)
+                                        property bool dragging: false
+
+                                        onPressed: mouse => {
+                                            pressPoint = Qt.point(mouse.x, mouse.y)
+                                            dragging = false
+                                            tileDelegate.refreshDragImage()
+                                            if (root.svc)
+                                                root.svc.stageItem(tileDelegate.modelData.path)
+                                        }
+
+                                        onPositionChanged: mouse => {
+                                            if (!pressed || dragging)
+                                                return
+                                            const dx = mouse.x - pressPoint.x
+                                            const dy = mouse.y - pressPoint.y
+                                            if (Math.sqrt(dx * dx + dy * dy) < 10)
+                                                return
+                                            dragging = true
+                                            tileDelegate.beginDrag()
+                                        }
+
+                                        onClicked: mouse => {
+                                            if (tileDelegate.browsable && root.svc)
+                                                root.svc.navigate(tileDelegate.modelData.path)
+                                        }
+                                    }
+
+                                    Column {
+                                        anchors.fill: parent
+                                        anchors.margins: Style.space(6)
+                                        spacing: Style.space(2)
+
+                                        Item {
+                                            width: parent.width
+                                            height: Style.space(40)
+
+                                            Text {
+                                                id: tileIcon
+                                                anchors.centerIn: parent
+                                                text: tileDelegate.glyph
+                                                textFormat: Text.PlainText
+                                                elide: Text.ElideRight
+                                                font.family: root.fontFamily
+                                                font.pixelSize: Style.font.display
+                                                color: Color.accent
+                                            }
+                                        }
+
+                                        Text {
+                                            width: parent.width
+                                            text: tileDelegate.name
+                                            textFormat: Text.PlainText
+                                            elide: Text.ElideMiddle
+                                            horizontalAlignment: Text.AlignHCenter
+                                            color: root.foreground
+                                            font.family: root.fontFamily
+                                            font.pixelSize: Style.font.caption
+                                        }
+
+                                        Text {
+                                            width: parent.width
+                                            text: tileDelegate.isFolder
+                                                ? (tileDelegate.childCount === 1 ? "1 item" : tileDelegate.childCount + " items")
+                                                : SafeModel.humanSize(modelData.size)
+                                            textFormat: Text.PlainText
+                                            elide: Text.ElideRight
+                                            horizontalAlignment: Text.AlignHCenter
+                                            color: Qt.alpha(root.foreground, 0.5)
+                                            font.family: root.fontFamily
+                                            font.pixelSize: Style.font.caption
+                                        }
+                                    }
+
+                                    // Hover actions, mirroring the list row.
+                                    Row {
+                                        anchors.top: parent.top
+                                        anchors.right: parent.right
+                                        anchors.margins: Style.space(4)
+                                        spacing: Style.space(2)
+                                        opacity: tileHover.hovered ? 1 : 0
+                                        enabled: opacity > 0
+
+                                        Behavior on opacity {
+                                            NumberAnimation { duration: 90 }
+                                        }
+
+                                        PanelActionButton {
+                                            iconText: root.glyphDownload
+                                            tooltipText: "Unlock to Downloads/OmaSafe"
+                                            foreground: root.foreground
+                                            fontFamily: root.fontFamily
+                                            enabled: !root.svc || !root.svc.busy
+                                            onClicked: root.svc.extractAt(tileDelegate.modelData.path)
+                                        }
+
+                                        PanelActionButton {
+                                            iconText: root.glyphTrash
+                                            tooltipText: "Destroy (encrypted copy is gone for good)"
+                                            foreground: root.foreground
+                                            hoverColor: Color.urgent
+                                            fontFamily: root.fontFamily
+                                            enabled: !root.svc || !root.svc.busy
+                                            onClicked: root.requestDelete(tileDelegate.modelData.path)
+                                        }
                                     }
                                 }
                             }
                         }
 
-                        // Empty state
+                        // Empty state — a folder can be empty while the safe
+                        // is not; the wording follows the location.
                         Column {
-                            visible: !!root.svc && root.svc.itemCount === 0
+                            visible: root.showContents
+                                     && (!root.svc || root.svc.visibleItems.length === 0)
                             width: parent.width
                             spacing: Style.space(6)
 
@@ -1036,7 +1402,8 @@ Panel {
                             Text {
                                 anchors.horizontalCenter: parent.horizontalCenter
                                 width: parent.width
-                                text: root.glyphDrop
+                                text: !root.svc || (root.svc.currentFolder === "/" && root.svc.itemCount === 0)
+                                      ? root.glyphDrop : root.glyphFolderOpen
                                 textFormat: Text.PlainText
                                 elide: Text.ElideRight
                                 horizontalAlignment: Text.AlignHCenter
@@ -1048,7 +1415,9 @@ Panel {
                             Text {
                                 width: parent.width
                                 horizontalAlignment: Text.AlignHCenter
-                                text: "The safe is empty"
+                                text: !root.svc || (root.svc.currentFolder === "/" && root.svc.itemCount === 0)
+                                      ? "The safe is empty"
+                                      : "This folder is empty"
                                 textFormat: Text.PlainText
                                 color: root.foreground
                                 font.family: root.fontFamily
@@ -1058,7 +1427,9 @@ Panel {
                             Text {
                                 width: parent.width
                                 horizontalAlignment: Text.AlignHCenter
-                                text: "Drop files or folders here — or on the bar icon. Press a row and drag it anywhere to take it out."
+                                text: !root.svc || (root.svc.currentFolder === "/" && root.svc.itemCount === 0)
+                                      ? "Drop files or folders here — or on the bar icon. Press an item and drag it anywhere to take it out."
+                                      : "Drop files here to add them inside this folder."
                                 textFormat: Text.PlainText
                                 wrapMode: Text.WordWrap
                                 color: Qt.alpha(root.foreground, 0.55)
@@ -1135,7 +1506,7 @@ Panel {
                         Text {
                             visible: !!root.svc && !root.svc.busy && root.showContents
                             width: parent.width
-                            text: "Press an item and drag it into any window to take a copy out."
+                            text: "Click folders to browse, drop onto one to add inside. Press an item and drag it into any window to take a copy out."
                             textFormat: Text.PlainText
                             elide: Text.ElideRight
                             color: Qt.alpha(root.foreground, 0.4)
@@ -1157,52 +1528,37 @@ Panel {
                 }
             }
 
-            // The whole card is a drop target while the safe is open. A
-            // highlighted border is the only feedback a hovering drag gets.
-            DropArea {
-                anchors.fill: parent
-
-                onEntered: drag => {
-                    if (!drag.hasUrls && !drag.hasText)
-                        return
-                    drag.accept(Qt.CopyAction)
-                    root.cardDropActive = true
-                }
-
-                onExited: root.cardDropActive = false
-
-                onDropped: drop => {
-                    root.cardDropActive = false
-                    if (!root.svc)
-                        return
-                    const entries = drop.hasUrls ? drop.urls : String(drop.text).split("\n")
-                    if (root.svc.phase !== "unlocked")
-                        root.showToast("Unlock the safe before adding files")
-                    else
-                        root.svc.stash(entries)
-                    if (drop.hasUrls)
-                        drop.accept(Qt.CopyAction)
-                }
-            }
-
             // Destroy confirmation. Anchored over the whole card, like the
             // clipboard history's.
             ConfirmDialog {
                 anchors.fill: parent
                 z: 10
                 opened: root.deleteConfirmOpen
-                message: root.deleteIndex >= 0 && root.svc && root.deleteIndex < root.svc.itemCount
-                    ? "Destroy " + SafeModel.safeName(root.svc.items[root.deleteIndex].name)
-                      + "? The encrypted copy is erased for good."
-                    : ""
+                message: {
+                    if (!root.svc || root.deletePath === "")
+                        return ""
+                    const it = (root.svc.items || []).find(e => e.path === root.deletePath)
+                    if (!it)
+                        return ""
+                    const name = SafeModel.baseNameOf(it.path)
+                    if (it.isDir && it.legacy !== true) {
+                        const kids = (root.svc.items || []).filter(
+                            e => SafeModel.isUnder(e.path, it.path) && !e.isDir).length
+                        return kids > 0
+                            ? "Destroy " + name + " and the " + kids + (kids === 1 ? " file" : " files")
+                              + " inside it? The encrypted copies are erased for good."
+                            : "Destroy " + name + "? The encrypted copy is erased for good."
+                    }
+                    return "Destroy " + name + "? The encrypted copy is erased for good."
+                }
                 confirmText: "Destroy"
                 background: Color.background
                 foreground: root.foreground
                 fontFamily: root.fontFamily
                 onCanceled: root.deleteConfirmOpen = false
                 onConfirmed: {
-                    if (root.svc && root.deleteIndex >= 0)
-                        root.svc.deleteAt(root.deleteIndex)
+                    if (root.svc && root.deletePath !== "")
+                        root.svc.deleteAt(root.deletePath)
                     root.deleteConfirmOpen = false
                 }
             }

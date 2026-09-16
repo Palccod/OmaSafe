@@ -15,11 +15,19 @@ import "SafeModel.js" as SafeModel
 //                                              the user's password
 //   ~/.local/share/.omasafe/vault/recovery.enc the vault key, encrypted under
 //                                              the back-up key
-//   ~/.local/share/.omasafe/vault/index.enc  the manifest (names, sizes),
+//   ~/.local/share/.omasafe/vault/index.enc  the manifest (vault paths, sizes),
 //                                            encrypted under the vault key
-//   ~/.local/share/.omasafe/vault/<id>       one blob per item, openssl
+//   ~/.local/share/.omasafe/vault/<id>       one blob per FILE, openssl
 //                                            AES-256-CBC + PBKDF2, filename
 //                                            is a random 32-hex id
+//
+// The index is a tiny file system: every entry carries a vault-absolute path
+// ("/photos", "/photos/cat.jpg"); folder entries are structural markers and
+// only files have blobs. That is what makes the safe browsable and lets a
+// drop land inside a folder — and it means adding one file to a big folder
+// re-encrypts one file, not the folder. Safes from before 0.4.0 stored a
+// dropped folder as one tar blob; those are exploded into per-file blobs on
+// the first unlock after the upgrade (see _migrateLegacy).
 //
 // Nothing on disk is plaintext and nothing is named after its content: a
 // file manager shows a directory of opaque blobs. The vault key exists in
@@ -57,9 +65,17 @@ Item {
     // True while this session was opened with the back-up key rather than
     // the password — the card then offers a password change up front.
     property bool unlockedViaRecovery: false
-    // Manifest entries while unlocked: [{id, name, isDir, size, addedAt}]
+    // Manifest entries while unlocked: [{id, path, isDir, size, addedAt}]
+    // where `path` is vault-absolute ("/photos/cat.jpg"); only files carry
+    // an `id` (their blob). Folder entries are structural markers.
     property var items: []
     readonly property int itemCount: items ? items.length : 0
+    // The folder the card is currently browsing ("/" = safe root). Pure view
+    // state, but it lives here so the drop target and IPC share one truth.
+    property string currentFolder: "/"
+    // The listing for the card: direct children of currentFolder, folders
+    // first, each alphabetical.
+    readonly property var visibleItems: _listFolder(currentFolder)
     // Decrypted copies staged for drag-out: id → {path, at}. The path is what
     // the native drag offers as text/uri-list.
     property var staged: ({})
@@ -97,6 +113,9 @@ Item {
     readonly property int maxIndexBytes: 4 * 1024 * 1024
     readonly property int maxIpcPayloadBytes: 256 * 1024
     readonly property int maxVaultItems: 4096
+    // One recursive folder drop may queue at most this many file encryptions;
+    // larger trees are refused whole rather than half-stashed.
+    readonly property int maxStashFiles: 200
 
     // --- the job queue --------------------------------------------------------
     //
@@ -255,6 +274,10 @@ Item {
     Component.onCompleted: {
         Quickshell.execDetached(["mkdir", "-p", root.stateHome + "/omarchy/plugins"])
         _mkdirs((code, out) => {
+            // A killed shell can leave staged plaintext behind with no sweeper
+            // running. Nothing legitimate can be in the stage dir at boot —
+            // the safe starts locked — so it is wiped before anything else.
+            _enqueue(["rm", "-rf", "--", root.stageDir], {}, null)
             _enqueue(["sh", "-c", 'if [ -f "$1" ] && [ -f "$2" ]; then echo yes; else echo no; fi',
                       "omasafe-check", root.wrapPath, root.indexPath], {}, (c, out2) => {
                 root.initialized = out2.trim() === "yes"
@@ -390,6 +413,69 @@ Item {
         root.clearStaged()
         autoLockTimer.stop()
         root.phase = root.initialized ? "locked" : "empty"
+        root.currentFolder = "/"
+    }
+
+    // --- browsing ---------------------------------------------------------------
+    //
+    // The card browses the index like a tiny file system. A folder row is one
+    // click away from its contents; a drop can land in whatever folder is
+    // open instead of the root.
+
+    function _listFolder(folder) {
+        return SafeModel.childrenOf(root.items, folder)
+    }
+
+    // Open a folder (or "/" for the root). Anything else is ignored — the
+    // path came from the index, but paths are checked again on the way in.
+    function navigate(path) {
+        const p = String(path || "/")
+        if (!SafeModel.validVaultPath(p))
+            return false
+        if (p !== "/" && !(root.items || []).some(it => it.path === p && it.isDir))
+            return false
+        root.currentFolder = p
+        return true
+    }
+
+    // True when `path` names a folder in the index (or the root, always a
+    // folder). Drop targets call this before accepting a payload.
+    function isFolder(path) {
+        const p = String(path || "/")
+        if (p === "/")
+            return true
+        return (root.items || []).some(it => it.path === p && it.isDir)
+    }
+
+    // A vault path that is not taken yet: "cat.jpg" → "cat.jpg", then
+    // "cat (2).jpg", … inside `folder`. `taken` is the list of paths already
+    // claimed by the index or by earlier entries of the same drop.
+    function _uniqueVaultPath(folder, name, taken) {
+        const base = SafeModel.safeName(name)
+        let candidate = SafeModel.childPath(folder, base)
+        if (taken.indexOf(candidate) === -1)
+            return candidate
+        const dot = base.lastIndexOf(".")
+        const stem = dot > 0 ? base.substring(0, dot) : base
+        const ext = dot > 0 ? base.substring(dot) : ""
+        for (let i = 2; i < 1000; i++) {
+            candidate = SafeModel.childPath(folder, stem + " (" + i + ")" + ext)
+            if (taken.indexOf(candidate) === -1)
+                return candidate
+        }
+        return SafeModel.childPath(folder, SafeModel.basename(candidate) + " (copy)")
+    }
+
+    // Every folder path from "/" down to the parent of `path` — used to
+    // synthesize structural entries the index may lack after a load.
+    function _ancestorPaths(path) {
+        const out = []
+        let p = SafeModel.parentOf(String(path || "/"))
+        while (p !== "/") {
+            out.push(p)
+            p = SafeModel.parentOf(p)
+        }
+        return out
     }
 
     // --- drag-out staging -------------------------------------------------------
@@ -400,8 +486,8 @@ Item {
     // the plaintext is on disk — Drag.startDrag() blocks until the drop lands,
     // so it must be the plain path by then.
 
-    function _stageDone(id, path, ok, name, gen) {
-        delete root._staging[id]
+    function _stageDone(key, path, ok, name, gen) {
+        delete root._staging[key]
         root.busyLabel = ""
         // Locked mid-staging: the stage wipe is already queued behind this
         // job, so recording the path would leave the chips pointing at a
@@ -416,24 +502,29 @@ Item {
         // fire the change signal, and the chips' stage-path bindings would
         // never see the new entry.
         const map = Object.assign({}, root.staged)
-        map[id] = { path: path, at: Date.now() }
+        map[key] = { path: path, at: Date.now() }
         root.staged = map
     }
 
-    // Decrypts an item into the stage directory (idempotent per id). Returns
-    // immediately; the widget polls `staged` for the resulting path.
-    function stageItem(index) {
-        if (root.phase !== "unlocked" || index < 0 || index >= root.items.length)
+    // Decrypts an item into the stage directory (idempotent per path).
+    // Returns immediately; the widget polls `staged` for the resulting path.
+    // Folders stage as real folders — every file under them is decrypted
+    // into place — so a drag-out carries the whole tree.
+    function stageItem(path) {
+        if (root.phase !== "unlocked")
             return false
-        const item = root.items[index]
-        if (root.staged[item.id] || root._staging[item.id])
+        const item = (root.items || []).find(it => it.path === path)
+        if (!item)
+            return false
+        if (root.staged[item.path] || root._staging[item.path])
             return true
-        root._staging[item.id] = true
-        root.busyLabel = "Preparing " + item.name + "…"
+        root._staging[item.path] = true
+        const name = SafeModel.baseNameOf(item.path)
+        root.busyLabel = "Preparing " + name + "…"
         const gen = root._generation
         _enqueue(["sh", "-c", 'umask 077; mkdir -p -- "$1"', "omasafe-stage", root.stageDir], {}, (mc, mo) => {
             if (mc !== 0) {
-                _stageDone(item.id, "", false, item.name, gen)
+                _stageDone(item.path, "", false, name, gen)
                 return
             }
             // A stage name that is not already taken, so two items that share
@@ -441,49 +532,146 @@ Item {
             _enqueue(["sh", "-c",
                       'n="$2"; base="$2"; ext=""; case "$2" in *.*) base="${2%.*}"; ext=".${2##*.}";; esac; '
                     + 'i=1; while [ -e "$1/$n" ] && [ "$i" -lt 50 ]; do i=$((i+1)); n="$base ($i)$ext"; done; printf "%s" "$n"',
-                      "omasafe-stage-name", root.stageDir, SafeModel.safeName(item.name)], {}, (cc, co) => {
+                      "omasafe-stage-name", root.stageDir, SafeModel.safeName(name)], {}, (cc, co) => {
                 if (root._stale(gen)) {
-                    _stageDone(item.id, "", false, item.name, gen)
+                    _stageDone(item.path, "", false, name, gen)
                     return
                 }
-                const finalName = co.trim() || SafeModel.safeName(item.name)
+                const finalName = co.trim() || SafeModel.safeName(name)
                 const target = root.stageDir + "/" + finalName
-                const blobPath = root.vaultDir + "/" + item.id
-                if (item.isDir) {
-                    _enqueue(_cipherArgv(blobPath, root.scratchDir + "/item.tar", "OS_KEY", true),
-                             { OS_KEY: root.sessionKey }, (dc, dOut) => {
-                        if (dc !== 0) {
-                            _rmScratch("item.tar")
-                            _stageDone(item.id, "", false, item.name, gen)
-                            return
-                        }
-                        _enqueue(["rm", "-rf", "--", root.scratchDir + "/extract"], {}, () => {
-                            _enqueue(["mkdir", "-p", "--", root.scratchDir + "/extract"], {}, () => {
-                                _enqueue(["tar", "-C", root.scratchDir + "/extract", "-xf",
-                                          root.scratchDir + "/item.tar"], {}, (xc, xo) => {
-                                    _rmScratch("item.tar")
-                                    if (xc !== 0) {
-                                        _stageDone(item.id, "", false, item.name, gen)
-                                        return
-                                    }
-                                    _enqueue(["mv", "--", root.scratchDir + "/extract/" + SafeModel.safeName(item.name),
-                                              target], {}, (vc, vo) => {
-                                        _enqueue(["rm", "-rf", "--", root.scratchDir + "/extract"], {}, () => {})
-                                        _stageDone(item.id, target, vc === 0, item.name, gen)
-                                    })
-                                })
-                            })
-                        })
-                    })
-                } else {
+                if (!item.isDir) {
+                    const blobPath = root.vaultDir + "/" + item.id
                     _enqueue(_cipherArgv(blobPath, target, "OS_KEY", true),
                              { OS_KEY: root.sessionKey }, (dc, do2) => {
-                        _stageDone(item.id, target, dc === 0, item.name, gen)
+                        _stageDone(item.path, target, dc === 0, name, gen)
                     })
+                    return
                 }
+                if (item.legacy) {
+                    root._stageLegacyTar(item, target, name, gen)
+                    return
+                }
+                // Modern folder: stage every file under it, preserving the
+                // subtree layout.
+                const files = []
+                const dirs = []
+                for (const it of root.items) {
+                    if (!SafeModel.isUnder(it.path, item.path))
+                        continue
+                    if (it.isDir) {
+                        if (dirs.indexOf(it.path) === -1)
+                            dirs.push(it.path)
+                    } else {
+                        files.push(it)
+                    }
+                }
+                if (files.length === 0) {
+                    _enqueue(["mkdir", "-p", "--", target], {}, () => {
+                        _stageDone(item.path, target, true, name, gen)
+                    })
+                    return
+                }
+                const mkdirArgs = ["mkdir", "-p", "--", target]
+                for (const d of dirs) {
+                    const rel = d.substring(item.path.length)
+                    mkdirArgs.push(target + rel)
+                }
+                _enqueue(mkdirArgs, {}, (pc, po) => {
+                    if (root._stale(gen)) {
+                        _stageDone(item.path, "", false, name, gen)
+                        return
+                    }
+                    if (pc !== 0) {
+                        _stageDone(item.path, "", false, name, gen)
+                        return
+                    }
+                    const jobs = []
+                    for (const f of files) {
+                        const rel = f.path.substring(item.path.length)
+                        jobs.push({ id: f.id, target: target + rel, name: SafeModel.baseNameOf(f.path) })
+                    }
+                    root._decryptList(jobs, "Preparing " + name + "…", ok => {
+                        _stageDone(item.path, target, ok, name, gen)
+                    }, gen)
+                })
             })
         })
         return true
+    }
+
+    // Decrypts blobs one by one through scratch into their final paths.
+    // jobs: [{id, target, name}]; done(ok). Used by folder staging and
+    // folder export — the queue makes the sequence strictly ordered.
+    function _decryptList(jobs, label, done, gen) {
+        let idx = 0
+        const step = () => {
+            if (root._stale(gen)) {
+                done(false)
+                return
+            }
+            if (idx >= jobs.length) {
+                done(true)
+                return
+            }
+            const j = jobs[idx]
+            idx++
+            root.busyLabel = label + " " + idx + "/" + jobs.length
+            _enqueue(_cipherArgv(root.vaultDir + "/" + j.id, root.scratchDir + "/export.bin", "OS_KEY", true),
+                     { OS_KEY: root.sessionKey }, (dc, dOut) => {
+                if (root._stale(gen)) {
+                    _rmScratch("export.bin")
+                    done(false)
+                    return
+                }
+                if (dc !== 0) {
+                    _rmScratch("export.bin")
+                    root.busyLabel = ""
+                    done(false)
+                    return
+                }
+                _enqueue(["mv", "--", root.scratchDir + "/export.bin", j.target], {}, (vc, vo) => {
+                    if (vc !== 0)
+                        _rmScratch("export.bin")
+                    if (vc !== 0) {
+                        root.busyLabel = ""
+                        done(false)
+                        return
+                    }
+                    step()
+                })
+            })
+        }
+        step()
+    }
+
+    // A pre-0.4.0 folder is one tar blob; stage it the old way until the
+    // upgrade has exploded it.
+    function _stageLegacyTar(item, target, name, gen) {
+        _enqueue(_cipherArgv(root.vaultDir + "/" + item.id, root.scratchDir + "/item.tar", "OS_KEY", true),
+                 { OS_KEY: root.sessionKey }, (dc, dOut) => {
+            if (dc !== 0) {
+                _rmScratch("item.tar")
+                _stageDone(item.path, "", false, name, gen)
+                return
+            }
+            _enqueue(["rm", "-rf", "--", root.scratchDir + "/extract"], {}, () => {
+                _enqueue(["mkdir", "-p", "--", root.scratchDir + "/extract"], {}, () => {
+                    _enqueue(["tar", "-C", root.scratchDir + "/extract", "-xf",
+                              root.scratchDir + "/item.tar"], {}, (xc, xo) => {
+                        _rmScratch("item.tar")
+                        if (xc !== 0) {
+                            _stageDone(item.path, "", false, name, gen)
+                            return
+                        }
+                        _enqueue(["mv", "--", root.scratchDir + "/extract/" + SafeModel.safeName(name),
+                                  target], {}, (vc, vo) => {
+                            _enqueue(["rm", "-rf", "--", root.scratchDir + "/extract"], {}, () => {})
+                            _stageDone(item.path, target, vc === 0, name, gen)
+                        })
+                    })
+                })
+            })
+        })
     }
 
     // Removes every staged plaintext copy. Called when the safe locks; the
@@ -635,25 +823,59 @@ Item {
                 parsed = JSON.parse(out)
             } catch (e) {}
             const list = parsed && Array.isArray(parsed.items) ? parsed.items : []
+            const legacy = parsed && parsed.version === 1
             const clean = []
+            const seen = []
             for (const item of list) {
-                if (!item || typeof item.id !== "string" || !/^[0-9a-f]{32}$/.test(item.id))
-                    continue
-                if (typeof item.name !== "string" || item.name === "")
-                    continue
                 if (clean.length >= root.maxVaultItems)
                     break
+                if (!item)
+                    continue
+                // v1 entries carry `name` and live at the root; v2 entries
+                // carry a full vault path. Both are re-validated: the index
+                // was ciphertext and may have been tampered with.
+                const path = legacy
+                    ? SafeModel.childPath("/", SafeModel.safeName(item.name))
+                    : String(item.path || "")
+                if (path === "/" || !SafeModel.validVaultPath(path) || seen.indexOf(path) !== -1)
+                    continue
+                const isDir = item.isDir === true
+                let id = ""
+                if (!isDir || legacy) {
+                    // v1 folders are tar blobs; v2 folders are pure structure.
+                    id = typeof item.id === "string" ? item.id : ""
+                    if (!/^[0-9a-f]{32}$/.test(id))
+                        continue
+                }
+                seen.push(path)
                 clean.push({
-                    id: item.id,
-                    name: String(item.name),
-                    isDir: item.isDir === true,
+                    id: id,
+                    path: path,
+                    isDir: isDir,
+                    legacy: legacy && isDir,
                     size: SafeModel.clampInt(item.size, 0, 0, Number.MAX_SAFE_INTEGER),
                     addedAt: SafeModel.clampInt(item.addedAt, 0, 0, Number.MAX_SAFE_INTEGER)
                 })
             }
+            // A hand-edited index may reference files whose folders were
+            // never declared; synthesize the missing structure so every
+            // file's parent chain exists.
+            for (let i = 0; i < clean.length; i++) {
+                if (clean[i].isDir)
+                    continue
+                for (const anc of root._ancestorPaths(clean[i].path)) {
+                    if (seen.indexOf(anc) === -1) {
+                        seen.push(anc)
+                        clean.push({ id: "", path: anc, isDir: true, legacy: false, size: 0, addedAt: 0 })
+                    }
+                }
+            }
             root.items = clean
             root.lastError = ""
             root.phase = "unlocked"
+            root.currentFolder = "/"
+            if (legacy)
+                root._migrateLegacy(gen)
             root._ensureRecovery()
         })
     }
@@ -709,6 +931,206 @@ Item {
         })
     }
 
+    // --- the v1 → v2 upgrade ------------------------------------------------------
+    //
+    // Safes from before 0.4.0 stored a dropped folder as one tar blob. The
+    // first unlock after the upgrade explodes each of those into per-file
+    // blobs and rewrites the index as v2. A failure anywhere leaves the v1
+    // index on disk untouched — the upgrade simply retries next unlock, and
+    // the session keeps working with the tar blobs marked legacy.
+
+    function _migrateLegacy(gen) {
+        const dirs = []
+        for (const it of root.items)
+            if (it.legacy)
+                dirs.push(it)
+        if (dirs.length === 0) {
+            // Nothing to explode; persist the v2 layout (v1 files became
+            // path-keyed entries) so this upgrade stops running.
+            _writeIndex(null)
+            return
+        }
+        root.busyLabel = "Upgrading the safe…"
+        _migrateNext(dirs, 0, [], gen)
+    }
+
+    function _migrateNext(dirs, i, acc, gen) {
+        if (root._stale(gen)) {
+            root.busyLabel = ""
+            return
+        }
+        if (i >= dirs.length) {
+            const keep = []
+            for (const it of root.items)
+                if (!it.legacy)
+                    keep.push(it)
+            for (const e of acc)
+                keep.push(e)
+            root.items = keep
+            root.busyLabel = ""
+            _writeIndex(ok => {
+                if (ok)
+                    root._emitToast("Safe upgraded — folders are now browsable")
+            })
+            return
+        }
+        const entry = dirs[i]
+        _migrateOne(entry, newEntries => {
+            if (root._stale(gen))
+                return
+            if (newEntries === null) {
+                root.busyLabel = ""
+                root._emitToast("Could not upgrade a folder — the safe keeps the old layout and retries next unlock")
+                return
+            }
+            for (const e of newEntries)
+                acc.push(e)
+            _enqueue(["rm", "-f", "--", root.vaultDir + "/" + entry.id], {}, null)
+            _migrateNext(dirs, i + 1, acc, gen)
+        }, gen)
+    }
+
+    // Decrypts one legacy tar blob, unpacks it in scratch, and turns its
+    // contents into a plan of per-file blobs. done(newEntries|null).
+    function _migrateOne(entry, done, gen) {
+        _enqueue(_cipherArgv(root.vaultDir + "/" + entry.id, root.scratchDir + "/item.tar", "OS_KEY", true),
+                 { OS_KEY: root.sessionKey }, (dc, dOut) => {
+            if (root._stale(gen)) { done(null); return }
+            if (dc !== 0) { _rmScratch("item.tar"); done(null); return }
+            _enqueue(["rm", "-rf", "--", root.scratchDir + "/extract"], {}, () => {
+                _enqueue(["mkdir", "-p", "--", root.scratchDir + "/extract"], {}, () => {
+                    _enqueue(["tar", "-C", root.scratchDir + "/extract", "-xf",
+                              root.scratchDir + "/item.tar"], {}, (xc, xo) => {
+                        _rmScratch("item.tar")
+                        if (root._stale(gen)) { done(null); return }
+                        if (xc !== 0) { done(null); return }
+                        // Constant script; only the tree root travels as an
+                        // argument. %P gives paths relative to it.
+                        _enqueue(["sh", "-c",
+                                  'find "$1" -mindepth 1 ! -type l \\( -type f -o -type d \\) -printf \'%y\\t%s\\t%P\\n\' | sort',
+                                  "omasafe-find", root.scratchDir + "/extract"], {}, (fc, fo) => {
+                            if (root._stale(gen)) { done(null); return }
+                            if (fc !== 0) { done(null); return }
+                            root._migratePlan(entry, String(fo || ""), done, gen)
+                        })
+                    })
+                })
+            })
+        })
+    }
+
+    // Turns find output into a file plan (name collisions after
+    // sanitization get unique vault paths) and encrypts it blob by blob.
+    function _migratePlan(entry, findOut, done, gen) {
+        const srcDir = root.scratchDir + "/extract"
+        const taken = root._takenPaths()
+        const files = []
+        const dirs = []
+        let tooBig = false
+        for (const line of findOut.split("\n")) {
+            if (line === "")
+                continue
+            const parts = line.split("\t")
+            if (parts.length < 3)
+                continue
+            const kind = parts[0]
+            const rel = parts.slice(2).join("\t")
+            // The first segment is the archive's own root folder — the
+            // entry's vault path already carries it.
+            const segs = rel.split("/")
+            segs.shift()
+            let vp = entry.path
+            for (const s of segs)
+                vp = SafeModel.childPath(vp, SafeModel.safeName(s))
+            if (!SafeModel.validVaultPath(vp))
+                continue
+            if (kind === "d") {
+                if (dirs.indexOf(vp) === -1)
+                    dirs.push(vp)
+            } else {
+                if (files.length >= root.maxStashFiles) {
+                    tooBig = true
+                    break
+                }
+                const dest = root._uniqueVaultPath(SafeModel.parentOf(vp), SafeModel.baseNameOf(vp), taken)
+                taken.push(dest)
+                files.push({
+                    disk: srcDir + "/" + rel,
+                    vaultPath: dest,
+                    size: SafeModel.clampInt(parts[1], 0, 0, Number.MAX_SAFE_INTEGER)
+                })
+            }
+        }
+        if (tooBig) {
+            _enqueue(["rm", "-rf", "--", srcDir], {}, null)
+            done(null)
+            return
+        }
+        const out = []
+        for (const d of dirs)
+            out.push({ id: "", path: d, isDir: true, legacy: false, size: 0, addedAt: entry.addedAt })
+        root._encryptList(files, "Upgrading the safe…", newFiles => {
+            _enqueue(["rm", "-rf", "--", srcDir], {}, () => {
+                if (newFiles === null) {
+                    done(null)
+                    return
+                }
+                for (const f of newFiles)
+                    out.push(f)
+                done(out)
+            })
+        }, gen)
+    }
+
+    // Encrypts files one by one into fresh blobs. `files` is
+    // [{disk, vaultPath, size}]; done(entries|null) receives finished index
+    // entries, or null when the safe locked or a job failed — earlier blobs
+    // survive as orphans, which are harmless.
+    function _encryptList(files, label, done, gen) {
+        const out = []
+        let idx = 0
+        const step = () => {
+            if (root._stale(gen)) {
+                done(null)
+                return
+            }
+            if (idx >= files.length) {
+                done(out)
+                return
+            }
+            const f = files[idx]
+            idx++
+            root.busyLabel = label + " " + idx + "/" + files.length
+            _hexJob(16, id => {
+                if (!/^[0-9a-f]{32}$/.test(id)) {
+                    root.busyLabel = ""
+                    done(null)
+                    return
+                }
+                if (root._stale(gen)) {
+                    done(null)
+                    return
+                }
+                _enqueue(_cipherArgv(f.disk, root.vaultDir + "/" + id, "OS_KEY", false),
+                         { OS_KEY: root.sessionKey }, (ec, eo) => {
+                    if (root._stale(gen)) {
+                        done(null)
+                        return
+                    }
+                    if (ec !== 0) {
+                        root.busyLabel = ""
+                        done(null)
+                        return
+                    }
+                    out.push({ id: id, path: f.vaultPath, isDir: false, legacy: false,
+                               size: f.size, addedAt: Date.now() })
+                    step()
+                })
+            })
+        }
+        step()
+    }
+
     // Re-encrypts the manifest from the in-memory list. The queue makes this
     // race-free: only one job touches index.enc at a time.
     function _writeIndex(done) {
@@ -722,7 +1144,7 @@ Item {
             return
         }
         const gen = root._generation
-        const json = JSON.stringify({ version: 1, items: root.items })
+        const json = JSON.stringify({ version: 2, items: root.items })
         _writeScratch("index.json", json, () => {
             // The env below is captured at this exact moment, so the guard
             // has to sit here too — a lock that landed while the scratch
@@ -756,11 +1178,23 @@ Item {
 
     // --- stashing (drag & drop / IPC) ------------------------------------------
 
-    function stash(entries) {
+    // Every path already claimed in the index — the collision universe a new
+    // entry must be unique against.
+    function _takenPaths() {
+        const out = []
+        for (const it of root.items)
+            out.push(it.path)
+        return out
+    }
+
+    function stash(entries, folder) {
         if (root.phase !== "unlocked") {
             root._emitToast("Unlock the safe before adding files")
             return 0
         }
+        // Drops land in the folder the card is browsing; anything else (bar
+        // icon, IPC) goes to the root.
+        const target = typeof folder === "string" && root.isFolder(folder) ? folder : "/"
         const paths = SafeModel.pathsFromEntries(entries)
         const remaining = Math.max(0, root.maxVaultItems - root.itemCount)
         if (remaining === 0) {
@@ -768,7 +1202,9 @@ Item {
             return 0
         }
         // A cap keeps one IPC call — from a drag or a local caller — from
-        // queueing an unbounded pile of jobs against the running shell.
+        // queueing an unbounded pile of jobs against the running shell. A
+        // folder drop adds one entry per file, so the hard cap is checked
+        // again inside the recursive stasher.
         if (paths.length > 50) {
             paths.length = 50
             root._emitToast("Locking the first 50 items — the rest were refused")
@@ -779,18 +1215,17 @@ Item {
         }
         let queued = 0
         for (const path of paths) {
-            if (root._stashOne(path))
+            if (root._stashOne(path, target))
                 queued++
         }
         return queued
     }
 
-    function _stashOne(path) {
+    function _stashOne(path, folderPath) {
         const rawName = SafeModel.basename(path)
         const name = SafeModel.safeName(rawName)
         // The archive root and manifest name must remain identical. Refuse a
-        // deceptive/control-bearing basename rather than silently renaming it
-        // and producing a directory archive that cannot later be extracted.
+        // deceptive/control-bearing basename rather than silently renaming it.
         if (name === "" || name === "." || name === ".." || name !== rawName) {
             root._emitToast("Skipped an item whose name contains unsupported characters")
             return false
@@ -814,6 +1249,10 @@ Item {
                 root._emitToast("Skipped " + name + (kind === "link" ? " (symlinks are not safe material)" : ""))
                 return
             }
+            if (kind === "dir") {
+                root._stashFolder(path, folderPath, gen)
+                return
+            }
             _hexJob(16, id => {
                 if (id === "" || !/^[0-9a-f]{32}$/.test(id)) {
                     root.busyLabel = ""
@@ -824,44 +1263,16 @@ Item {
                     root.busyLabel = ""
                     return
                 }
-                const blobPath = root.vaultDir + "/" + id
-                if (kind === "dir") {
-                    // Folders travel as a tar stream: one blob per item keeps
-                    // the vault flat and anonymous.
-                    _enqueue(["tar", "-C", SafeModel.dirname(path), "-cf",
-                              root.scratchDir + "/item.tar", "--", name], {}, (tc, to) => {
-                        if (tc !== 0) {
-                            root.busyLabel = ""
-                            root._emitToast("Could not read " + name)
-                            return
-                        }
-                        if (root._stale(gen)) {
-                            _rmScratch("item.tar")
-                            root.busyLabel = ""
-                            return
-                        }
-                        _enqueue(_cipherArgv(root.scratchDir + "/item.tar", blobPath, "OS_KEY", false),
-                                 { OS_KEY: root.sessionKey }, (ec, eo) => {
-                            _rmScratch("item.tar")
-                            if (ec !== 0) {
-                                root.busyLabel = ""
-                                root._emitToast("Could not lock " + name)
-                                return
-                            }
-                            _stashCommit(id, name, true, size, path, gen)
-                        })
-                    })
-                } else {
-                    _enqueue(_cipherArgv(path, blobPath, "OS_KEY", false),
-                             { OS_KEY: root.sessionKey }, (ec, eo) => {
-                        if (ec !== 0) {
-                            root.busyLabel = ""
-                            root._emitToast("Could not lock " + name)
-                            return
-                        }
-                        _stashCommit(id, name, false, size, path, gen)
-                    })
-                }
+                const vaultPath = root._uniqueVaultPath(folderPath, name, root._takenPaths())
+                _enqueue(_cipherArgv(path, root.vaultDir + "/" + id, "OS_KEY", false),
+                         { OS_KEY: root.sessionKey }, (ec, eo) => {
+                    if (ec !== 0) {
+                        root.busyLabel = ""
+                        root._emitToast("Could not lock " + name)
+                        return
+                    }
+                    _stashCommit(id, vaultPath, size, path, gen)
+                })
             })
         })
         return true
@@ -872,42 +1283,198 @@ Item {
     // mid-pipeline stops here: the blob survives as an unindexed orphan
     // (harmless), the original stays on disk, and nothing is rewritten
     // under an empty key.
-    function _stashCommit(id, name, isDir, size, originalPath, gen) {
+    function _stashCommit(id, vaultPath, size, originalPath, gen) {
         if (root._stale(gen)) {
             root.busyLabel = ""
-            root._emitToast("The safe locked before " + name + " was recorded — nothing was deleted")
+            root._emitToast("The safe locked before " + SafeModel.baseNameOf(vaultPath)
+                            + " was recorded — nothing was deleted")
             return
         }
-        const entry = { id: id, name: name, isDir: isDir, size: size, addedAt: Date.now() }
+        const entry = { id: id, path: vaultPath, isDir: false, legacy: false,
+                        size: size, addedAt: Date.now() }
         const list = root.items.slice()
+        for (const anc of root._ancestorPaths(vaultPath)) {
+            if (!list.some(it => it.path === anc))
+                list.push({ id: "", path: anc, isDir: true, legacy: false,
+                            size: 0, addedAt: entry.addedAt })
+        }
         list.push(entry)
         root.items = list
         _writeIndex(ok => {
             root.busyLabel = ""
             if (!ok) {
-                root._emitToast(name + " is encrypted but not indexed — do not delete the original")
+                root._emitToast(SafeModel.baseNameOf(vaultPath) + " is encrypted but not indexed — do not delete the original")
                 return
             }
             if (_deletable(originalPath)) {
                 _enqueue(["rm", "-rf", "--", originalPath], {}, (rc, ro) => {
                     if (rc !== 0)
-                        root._emitToast("Locked " + name + " — the original could not be removed")
+                        root._emitToast("Locked " + SafeModel.baseNameOf(vaultPath) + " — the original could not be removed")
                     else
-                        root._emitToast("Locked " + name)
+                        root._emitToast("Locked " + SafeModel.baseNameOf(vaultPath))
                 })
             } else {
-                root._emitToast("Locked a copy of " + name)
+                root._emitToast("Locked a copy of " + SafeModel.baseNameOf(vaultPath))
+            }
+        })
+    }
+
+    // A dropped folder becomes a folder entry plus one blob per file, so it
+    // can be browsed and grown later without ever re-encrypting the whole
+    // tree. The index is written once, after the last file.
+    function _stashFolder(origPath, folderPath, gen) {
+        const rawName = SafeModel.basename(origPath)
+        const name = SafeModel.safeName(rawName)
+        if (name === "" || name === "." || name === ".." || name !== rawName) {
+            root.busyLabel = ""
+            root._emitToast("Skipped a folder whose name contains unsupported characters")
+            return
+        }
+        const taken = root._takenPaths()
+        const target = root._uniqueVaultPath(folderPath, name, taken)
+        taken.push(target)
+        root.busyLabel = "Reading " + name + "…"
+        // Constant script; only the tree root travels as an argument. %P
+        // gives paths relative to it, sorted for deterministic order.
+        _enqueue(["sh", "-c",
+                  'find "$1" -mindepth 1 ! -type l \\( -type f -o -type d \\) -printf \'%y\\t%s\\t%P\\n\' | sort',
+                  "omasafe-find", origPath], {}, (fc, fo) => {
+            if (root._stale(gen)) {
+                root.busyLabel = ""
+                return
+            }
+            root.busyLabel = ""
+            if (fc !== 0) {
+                root._emitToast("Could not read " + name)
+                return
+            }
+            const files = []
+            const dirs = []
+            let tooBig = false
+            for (const line of String(fo || "").split("\n")) {
+                if (line === "")
+                    continue
+                const parts = line.split("\t")
+                if (parts.length < 3)
+                    continue
+                const rel = parts.slice(2).join("\t")
+                let vp = target
+                for (const s of rel.split("/"))
+                    vp = SafeModel.childPath(vp, SafeModel.safeName(s))
+                if (!SafeModel.validVaultPath(vp))
+                    continue
+                if (parts[0] === "d") {
+                    if (dirs.indexOf(vp) === -1)
+                        dirs.push(vp)
+                } else {
+                    if (files.length >= root.maxStashFiles) {
+                        tooBig = true
+                        break
+                    }
+                    const dest = root._uniqueVaultPath(SafeModel.parentOf(vp), SafeModel.baseNameOf(vp), taken)
+                    taken.push(dest)
+                    files.push({
+                        disk: origPath + "/" + rel,
+                        vaultPath: dest,
+                        size: SafeModel.clampInt(parts[1], 0, 0, Number.MAX_SAFE_INTEGER)
+                    })
+                }
+            }
+            if (tooBig) {
+                root._emitToast(name + " holds more than " + root.maxStashFiles
+                                + " files — refused whole, nothing was changed")
+                return
+            }
+            // Structure entries: the found dirs plus every ancestor a file
+            // implies, all the way up to the folder being dropped.
+            for (const f of files) {
+                for (const anc of root._ancestorPaths(f.vaultPath))
+                    if (dirs.indexOf(anc) === -1)
+                        dirs.push(anc)
+            }
+            for (let i = 0; i < dirs.length; ) {
+                const above = root._ancestorPaths(dirs[i])
+                let grew = false
+                for (const anc of above)
+                    if (dirs.indexOf(anc) === -1) {
+                        dirs.push(anc)
+                        grew = true
+                    }
+                if (!grew)
+                    i++
+            }
+            if (root.itemCount + dirs.length + files.length > root.maxVaultItems) {
+                root._emitToast("Not enough room for " + name + " — nothing was changed")
+                return
+            }
+            if (files.length === 0) {
+                // An empty folder is still a folder: record the structure.
+                const entries = [{ id: "", path: target, isDir: true, legacy: false,
+                                   size: 0, addedAt: Date.now() }]
+                for (const d of dirs)
+                    if (d !== target)
+                        entries.push({ id: "", path: d, isDir: true, legacy: false,
+                                       size: 0, addedAt: Date.now() })
+                _commitEntries(entries, origPath, gen)
+                return
+            }
+            _encryptList(files, "Locking " + name + "…", newFiles => {
+                if (newFiles === null)
+                    return
+                const entries = [{ id: "", path: target, isDir: true, legacy: false,
+                                   size: 0, addedAt: Date.now() }]
+                for (const d of dirs)
+                    if (d !== target)
+                        entries.push({ id: "", path: d, isDir: true, legacy: false,
+                                       size: 0, addedAt: Date.now() })
+                for (const f of newFiles)
+                    entries.push(f)
+                _commitEntries(entries, origPath, gen)
+            }, gen)
+        })
+    }
+
+    // Appends finished entries to the index in a single write, then removes
+    // the original. Callers have gen-guarded their way here; the write
+    // re-checks on its own.
+    function _commitEntries(entries, originalPath, gen) {
+        if (root._stale(gen)) {
+            root.busyLabel = ""
+            root._emitToast("The safe locked — nothing was recorded, the original was kept")
+            return
+        }
+        const list = root.items.slice()
+        for (const e of entries)
+            list.push(e)
+        root.items = list
+        const label = SafeModel.baseNameOf(entries[0].path)
+        _writeIndex(ok => {
+            root.busyLabel = ""
+            if (!ok) {
+                root._emitToast("Encrypted, but the index could not be updated — do not delete the original")
+                return
+            }
+            if (_deletable(originalPath)) {
+                _enqueue(["rm", "-rf", "--", originalPath], {}, (rc, ro) => {
+                    root._emitToast(rc === 0 ? "Locked " + label
+                                             : "Locked " + label + " — the original could not be removed")
+                })
+            } else {
+                root._emitToast("Locked a copy of " + label)
             }
         })
     }
 
     // --- extraction -----------------------------------------------------------
 
-    function extractAt(index) {
-        if (root.phase !== "unlocked" || index < 0 || index >= root.items.length)
+    function extractAt(path) {
+        if (root.phase !== "unlocked")
             return
-        const item = root.items[index]
-        root.busyLabel = "Unlocking " + item.name + "…"
+        const item = (root.items || []).find(it => it.path === path)
+        if (!item)
+            return
+        const name = SafeModel.baseNameOf(item.path)
+        root.busyLabel = "Unlocking " + name + "…"
         const gen = root._generation
         _enqueue(["sh", "-c", 'mkdir -p -- "$1"', "omasafe-export", root.exportDir], {}, (mc, mo) => {
             if (mc !== 0) {
@@ -915,107 +1482,213 @@ Item {
                 root._emitToast("Could not create " + root.exportDir)
                 return
             }
+            if (item.isDir && !item.legacy) {
+                root._extractFolder(item, name, gen)
+                return
+            }
             // Pick an export name that is not already taken; the loop is a
             // constant script, the starting name an argument.
             _enqueue(["sh", "-c",
                       'n="$2"; base="$2"; ext=""; case "$2" in *.*) base="${2%.*}"; ext=".${2##*.}";; esac; '
                     + 'i=1; while [ -e "$1/$n" ] && [ "$i" -lt 50 ]; do i=$((i+1)); n="$base ($i)$ext"; done; printf "%s" "$n"',
-                      "omasafe-collision", root.exportDir, SafeModel.safeName(item.name)], {}, (cc, co) => {
+                      "omasafe-collision", root.exportDir, SafeModel.safeName(name)], {}, (cc, co) => {
                 // Everything below decrypts with the session key; a safe that
                 // locked meanwhile must not decrypt garbage into Downloads.
                 if (root._stale(gen)) {
                     root.busyLabel = ""
                     return
                 }
-                const finalName = co.trim() || SafeModel.safeName(item.name)
-                const blobPath = root.vaultDir + "/" + item.id
+                const finalName = co.trim() || SafeModel.safeName(name)
                 if (item.isDir) {
-                    // Decrypt the tarball into scratch, unpack into a fresh
-                    // scratch folder, then move the result into place — that
-                    // way a name collision renames the folder, not merges it.
-                    _enqueue(_cipherArgv(blobPath, root.scratchDir + "/item.tar", "OS_KEY", true),
-                             { OS_KEY: root.sessionKey }, (dc, dOut) => {
-                        if (dc !== 0) {
-                            _rmScratch("item.tar")
-                            root.busyLabel = ""
-                            root._emitToast("Could not unlock " + item.name)
-                            return
-                        }
-                        _enqueue(["rm", "-rf", "--", root.scratchDir + "/extract"], {}, () => {
-                            _enqueue(["mkdir", "-p", "--", root.scratchDir + "/extract"], {}, () => {
-                                _enqueue(["tar", "-C", root.scratchDir + "/extract", "-xf",
-                                          root.scratchDir + "/item.tar"], {}, (xc, xo) => {
-                                    _rmScratch("item.tar")
-                                    if (xc !== 0) {
-                                        root.busyLabel = ""
-                                        root._emitToast("Could not unpack " + item.name)
-                                        return
-                                    }
-                                    _enqueue(["mv", "--", root.scratchDir + "/extract/" + SafeModel.safeName(item.name),
-                                              root.exportDir + "/" + finalName], {}, (vc, vo) => {
-                                        _enqueue(["rm", "-rf", "--", root.scratchDir + "/extract"], {}, () => {})
-                                        root.busyLabel = ""
-                                        if (vc !== 0)
-                                            root._emitToast("Could not move " + item.name + " out of the safe")
-                                        else
-                                            root._emitToast("Saved " + finalName + " to Downloads/OmaSafe")
-                                    })
-                                })
-                            })
-                        })
-                    })
-                } else {
-                    // Files decrypt into the scratch dir and are renamed into
-                    // place: a rename replaces whatever sits at the target
-                    // (including a hostile symlink) instead of following it,
-                    // and the write lands atomically.
-                    _enqueue(_cipherArgv(blobPath, root.scratchDir + "/export.bin", "OS_KEY", true),
-                             { OS_KEY: root.sessionKey }, (dc, do2) => {
-                        if (dc !== 0) {
+                    // Legacy tar folder: unpack straight into place.
+                    root._extractLegacyTar(item, finalName, name, gen)
+                    return
+                }
+                const blobPath = root.vaultDir + "/" + item.id
+                // Files decrypt into the scratch dir and are renamed into
+                // place: a rename replaces whatever sits at the target
+                // (including a hostile symlink) instead of following it,
+                // and the write lands atomically.
+                _enqueue(_cipherArgv(blobPath, root.scratchDir + "/export.bin", "OS_KEY", true),
+                         { OS_KEY: root.sessionKey }, (dc, do2) => {
+                    if (dc !== 0) {
+                        _rmScratch("export.bin")
+                        root.busyLabel = ""
+                        root._emitToast("Could not unlock " + name)
+                        return
+                    }
+                    _enqueue(["mv", "--", root.scratchDir + "/export.bin",
+                              root.exportDir + "/" + finalName], {}, (vc, vo) => {
+                        if (vc !== 0)
                             _rmScratch("export.bin")
+                        root.busyLabel = ""
+                        if (vc !== 0)
+                            root._emitToast("Could not move " + name + " out of the safe")
+                        else
+                            root._emitToast("Saved " + finalName + " to Downloads/OmaSafe")
+                    })
+                })
+            })
+        })
+    }
+
+    // Modern folder export: recreate the subtree under one fresh name in
+    // Downloads/OmaSafe — a collision renames the folder instead of merging.
+    function _extractFolder(item, name, gen) {
+        _enqueue(["sh", "-c",
+                  'n="$2"; base="$2"; ext=""; case "$2" in *.*) base="${2%.*}"; ext=".${2##*.}";; esac; '
+                + 'i=1; while [ -e "$1/$n" ] && [ "$i" -lt 50 ]; do i=$((i+1)); n="$base ($i)$ext"; done; printf "%s" "$n"',
+                  "omasafe-collision", root.exportDir, SafeModel.safeName(name)], {}, (cc, co) => {
+            if (root._stale(gen)) {
+                root.busyLabel = ""
+                return
+            }
+            const finalName = co.trim() || SafeModel.safeName(name)
+            const rootTarget = root.exportDir + "/" + finalName
+            const files = []
+            const dirs = []
+            for (const it of root.items) {
+                if (!SafeModel.isUnder(it.path, item.path))
+                    continue
+                if (it.isDir) {
+                    if (dirs.indexOf(it.path) === -1)
+                        dirs.push(it.path)
+                } else {
+                    files.push(it)
+                }
+            }
+            if (files.length === 0) {
+                // An empty folder exports as an empty folder.
+                _enqueue(["mkdir", "-p", "--", rootTarget], {}, (pc, po) => {
+                    root.busyLabel = ""
+                    root._emitToast(pc === 0 ? "Saved " + finalName + " to Downloads/OmaSafe"
+                                             : "Could not move " + name + " out of the safe")
+                })
+                return
+            }
+            // Every parent the extracted files need — the index's dir
+            // entries already cover the chain, mirrored under rootTarget.
+            const mkdirArgs = ["mkdir", "-p", "--", rootTarget]
+            for (const d of dirs) {
+                const rel = d.substring(item.path.length)
+                mkdirArgs.push(rootTarget + rel)
+            }
+            _enqueue(mkdirArgs, {}, (pc, po) => {
+                if (root._stale(gen)) {
+                    root.busyLabel = ""
+                    return
+                }
+                if (pc !== 0) {
+                    root.busyLabel = ""
+                    root._emitToast("Could not move " + name + " out of the safe")
+                    return
+                }
+                const jobs = []
+                for (const f of files) {
+                    const rel = f.path.substring(item.path.length)
+                    jobs.push({ id: f.id, target: rootTarget + rel,
+                                name: SafeModel.baseNameOf(f.path) })
+                }
+                root._decryptList(jobs, "Unlocking " + name + "…", ok => {
+                    root.busyLabel = ""
+                    if (ok)
+                        root._emitToast("Saved " + finalName + " to Downloads/OmaSafe")
+                    else
+                        root._emitToast("Could not move " + name + " out of the safe")
+                }, gen)
+            })
+        })
+    }
+
+    // Pre-0.4.0 tar folder: decrypt, unpack in scratch, move into place.
+    function _extractLegacyTar(item, finalName, name, gen) {
+        const blobPath = root.vaultDir + "/" + item.id
+        _enqueue(_cipherArgv(blobPath, root.scratchDir + "/item.tar", "OS_KEY", true),
+                 { OS_KEY: root.sessionKey }, (dc, dOut) => {
+            if (dc !== 0) {
+                _rmScratch("item.tar")
+                root.busyLabel = ""
+                root._emitToast("Could not unlock " + name)
+                return
+            }
+            _enqueue(["rm", "-rf", "--", root.scratchDir + "/extract"], {}, () => {
+                _enqueue(["mkdir", "-p", "--", root.scratchDir + "/extract"], {}, () => {
+                    _enqueue(["tar", "-C", root.scratchDir + "/extract", "-xf",
+                              root.scratchDir + "/item.tar"], {}, (xc, xo) => {
+                        _rmScratch("item.tar")
+                        if (xc !== 0) {
                             root.busyLabel = ""
-                            root._emitToast("Could not unlock " + item.name)
+                            root._emitToast("Could not unpack " + name)
                             return
                         }
-                        _enqueue(["mv", "--", root.scratchDir + "/export.bin",
+                        _enqueue(["mv", "--", root.scratchDir + "/extract/" + SafeModel.safeName(name),
                                   root.exportDir + "/" + finalName], {}, (vc, vo) => {
-                            if (vc !== 0)
-                                _rmScratch("export.bin")
+                            _enqueue(["rm", "-rf", "--", root.scratchDir + "/extract"], {}, () => {})
                             root.busyLabel = ""
                             if (vc !== 0)
-                                root._emitToast("Could not move " + item.name + " out of the safe")
+                                root._emitToast("Could not move " + name + " out of the safe")
                             else
                                 root._emitToast("Saved " + finalName + " to Downloads/OmaSafe")
                         })
                     })
-                }
+                })
             })
         })
     }
 
     // --- deletion / password ---------------------------------------------------
 
-    function deleteAt(index) {
-        if (root.phase !== "unlocked" || index < 0 || index >= root.items.length)
+    function deleteAt(path) {
+        if (root.phase !== "unlocked")
             return
-        const item = root.items[index]
-        root.busyLabel = "Destroying " + item.name + "…"
+        const item = (root.items || []).find(it => it.path === path)
+        if (!item)
+            return
+        const name = SafeModel.baseNameOf(item.path)
+        root.busyLabel = "Destroying " + name + "…"
         const gen = root._generation
+        if (item.isDir && !item.legacy) {
+            // Every file under the folder has its own blob; erase them all
+            // in one job, then drop the entries.
+            const ids = []
+            for (const it of root.items)
+                if (!it.isDir && SafeModel.isUnder(it.path, item.path))
+                    ids.push(it.id)
+            const argv = ["rm", "-f", "--"]
+            for (const id of ids)
+                argv.push(root.vaultDir + "/" + id)
+            _enqueue(argv, {}, (code, out) => {
+                if (root._stale(gen)) {
+                    root.busyLabel = ""
+                    root._emitToast("The safe locked before " + name + " was destroyed — it is still in the safe")
+                    return
+                }
+                _deleteEntries(item, name, gen)
+            })
+            return
+        }
         _enqueue(["rm", "-f", "--", root.vaultDir + "/" + item.id], {}, (code, out) => {
             if (root._stale(gen)) {
                 root.busyLabel = ""
-                root._emitToast("The safe locked before " + item.name + " was destroyed — it is still in the safe")
+                root._emitToast("The safe locked before " + name + " was destroyed — it is still in the safe")
                 return
             }
-            const list = root.items.slice()
-            const i = root.items.indexOf(item)
-            if (i !== -1)
-                list.splice(i, 1)
-            root.items = list
-            _writeIndex(ok => {
-                root.busyLabel = ""
-                root._emitToast(ok ? "Destroyed " + item.name : "Could not update the index")
-            })
+            _deleteEntries(item, name, gen)
+        })
+    }
+
+    function _deleteEntries(item, name, gen) {
+        const list = []
+        for (const it of root.items)
+            if (it !== item && !SafeModel.isUnder(it.path, item.path))
+                list.push(it)
+        root.items = list
+        // If the card was inside the deleted folder, walk back up.
+        if (root.currentFolder === item.path || SafeModel.isUnder(root.currentFolder, item.path))
+            root.currentFolder = SafeModel.parentOf(item.path)
+        _writeIndex(ok => {
+            root.busyLabel = ""
+            root._emitToast(ok ? "Destroyed " + name : "Could not update the index")
         })
     }
 

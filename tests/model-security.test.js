@@ -21,6 +21,21 @@ test("safeName provides a bounded non-special fallback", () => {
     assert.equal(model.safeName("x".repeat(300)).length, 240)
 })
 
+test("vault paths reject traversal, escapes, and display controls", () => {
+    assert.equal(model.validVaultPath("/photos/cat.jpg"), true)
+    assert.equal(model.validVaultPath("/photos"), true)
+    assert.equal(model.validVaultPath("/"), true)
+    assert.equal(model.validVaultPath("/photos/../secret"), false)
+    assert.equal(model.validVaultPath("/photos/./x"), false)
+    assert.equal(model.validVaultPath("photos/cat.jpg"), false)
+    assert.equal(model.validVaultPath("/photos//cat.jpg"), false)
+    assert.equal(model.validVaultPath("/photos/cat.jpg/"), false)
+    assert.equal(model.validVaultPath("/pho\tto"), false)
+    assert.equal(model.validVaultPath("/invoice\u202Eevil"), false)
+    assert.equal(model.validVaultPath("/" + "x".repeat(241)), false)
+    assert.equal(model.validVaultPath(null), false)
+})
+
 test("runtime source declares bounded inputs and stronger new passwords", () => {
     const service = readFileSync(new URL("../Service.qml", import.meta.url), "utf8")
     const widget = readFileSync(new URL("../BarWidget.qml", import.meta.url), "utf8")

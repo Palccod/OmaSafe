@@ -84,3 +84,97 @@ test("file-kind helpers are case-insensitive", () => {
   assert.equal(typeof model.itemGlyph("notes.txt", false), "string");
   assert.equal(typeof model.itemGlyph("data.bin", false), "string");
 });
+
+test("vault path helpers split, join, and bound ancestry", () => {
+  assert.equal(model.parentOf("/photos/cat.jpg"), "/photos");
+  assert.equal(model.parentOf("/photos"), "/");
+  assert.equal(model.parentOf("/"), "/");
+  assert.equal(model.parentOf(""), "/");
+  assert.equal(model.baseNameOf("/photos/cat.jpg"), "cat.jpg");
+  assert.equal(model.baseNameOf("/photos"), "photos");
+  assert.equal(model.baseNameOf("/"), "");
+  assert.equal(model.childPath("/", "photos"), "/photos");
+  assert.equal(model.childPath("/photos", "cat.jpg"), "/photos/cat.jpg");
+  assert.equal(model.isUnder("/photos/cat.jpg", "/photos"), true);
+  assert.equal(model.isUnder("/photos", "/photos"), false);
+  assert.equal(model.isUnder("/photographs/x", "/photos"), false);
+  assert.equal(model.isUnder("/anything", "/"), true);
+  assert.equal(model.isUnder("/", "/"), false);
+});
+
+test("breadcrumb chains walk from the root down", () => {
+  // Objects built inside the vm context have a foreign prototype, so compare
+  // flattened strings instead of deepEqual on the objects themselves.
+  const chain = (p) => Array.from(model.pathSegments(p), (s) => s.path + "|" + s.name);
+  assert.deepEqual(chain("/"), ["/|"]);
+  assert.deepEqual(chain("/photos/vacation"), ["/|", "/photos|photos", "/photos/vacation|vacation"]);
+});
+
+const sampleItems = [
+  { path: "/zebra.txt", isDir: false, size: 10, name: "zebra.txt" },
+  { path: "/photos", isDir: true, name: "photos" },
+  { path: "/photos/cat.jpg", isDir: false, size: 100, name: "cat.jpg" },
+  { path: "/photos/vacation", isDir: true, name: "vacation" },
+  { path: "/photos/vacation/sea.jpg", isDir: false, size: 200, name: "sea.jpg" },
+  { path: "/docs", isDir: true, name: "docs" },
+];
+
+test("vault path validation refuses traversal and control characters", () => {
+  assert.equal(model.validVaultPath("/photos/cat.jpg"), true);
+  assert.equal(model.validVaultPath("/"), true);
+  assert.equal(model.validVaultPath("/photos/../secret"), false);
+  assert.equal(model.validVaultPath("/photos/./secret"), false);
+  assert.equal(model.validVaultPath("/photos//x"), false);
+  assert.equal(model.validVaultPath("relative/path"), false);
+  assert.equal(model.validVaultPath("/tab\tchar"), false);
+  assert.equal(model.validVaultPath("/" + "x".repeat(241)), false);
+  assert.equal(model.validVaultPath(null), false);
+});
+
+test("breadcrumbs skip doubled separators and empty input stays at root", () => {
+  const chain = (p) => Array.from(model.pathSegments(p), (s) => s.path + "|" + s.name);
+  assert.deepEqual(chain("/photos//vacation"), ["/|", "/photos|photos", "/photos/vacation|vacation"]);
+  assert.deepEqual(chain(""), ["/|"]);
+});
+
+test("subtree stats tolerate a missing list and ties sort stably", () => {
+  assert.equal(model.subtreeStats(null, "/").files, 0);
+  const ties = [{ path: "/a.txt", isDir: false, name: "a.txt", size: 1 },
+                { path: "/A.txt", isDir: false, name: "A.txt", size: 2 }];
+  assert.equal(Array.from(model.childrenOf(ties, "/")).length, 2);
+});
+
+test("path helpers fall back safely on null arguments", () => {
+  assert.equal(model.isUnder(null, "/"), false);
+  assert.equal(model.isUnder("/x", null), true);
+  assert.equal(model.isUnder("/", null), false);
+  assert.equal(model.childPath("/", null), "/");
+  assert.equal(model.childPath(null, "a"), "/a");
+  const unnamed = [{ path: "/b.txt", isDir: false }, { path: "/a.txt", isDir: false }];
+  const sorted = Array.from(model.childrenOf(unnamed, "/"), (it) => it.path);
+  assert.deepEqual(sorted, ["/a.txt", "/b.txt"]);
+});
+
+test("folder listings show only direct children, folders first", () => {
+  assert.deepEqual(
+    Array.from(model.childrenOf(sampleItems, "/"), (it) => it.path),
+    ["/docs", "/photos", "/zebra.txt"],
+  );
+  assert.deepEqual(
+    Array.from(model.childrenOf(sampleItems, "/photos"), (it) => it.path),
+    ["/photos/vacation", "/photos/cat.jpg"],
+  );
+  assert.deepEqual(Array.from(model.childrenOf(sampleItems, "/docs")), []);
+  assert.deepEqual(Array.from(model.childrenOf(null, "/")), []);
+});
+
+test("subtree stats count files and bytes at any depth", () => {
+  const stats = (folder) => {
+    const s = model.subtreeStats(sampleItems, folder);
+    return s.files + " files / " + s.bytes + " bytes";
+  };
+  assert.equal(stats("/photos"), "2 files / 300 bytes");
+  assert.equal(stats("/photos/vacation"), "1 files / 200 bytes");
+  assert.equal(stats("/"), "3 files / 310 bytes");
+  assert.equal(stats("/docs"), "0 files / 0 bytes");
+});

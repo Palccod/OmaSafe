@@ -1,7 +1,122 @@
-// Pure helpers for OmaSafe: drop parsing, name hygiene, display formatting.
-// No Qt/Quickshell imports — everything here must stay testable and side
-// effect free, because every path that reaches the filesystem goes through
-// the service's fixed-argv jobs.
+// Pure helpers for OmaSafe: drop parsing, name hygiene, vault paths, display
+// formatting. No Qt/Quickshell imports — everything here must stay testable
+// and side effect free, because every path that reaches the filesystem goes
+// through the service's fixed-argv jobs.
+
+// --- vault paths -------------------------------------------------------------
+//
+// The safe is browsed like a small file system: every entry carries a
+// vault-absolute path ("/photos", "/photos/cat.jpg"); the root is "/".
+
+// Parent folder of a vault path ("/a/b" → "/a", "/a" → "/").
+function parentOf(path) {
+    const p = String(path || "")
+    if (p === "/" || p === "")
+        return "/"
+    const i = p.lastIndexOf("/")
+    return i <= 0 ? "/" : p.substring(0, i)
+}
+
+// Final segment of a vault path ("/a/b" → "b", "/" → "").
+function baseNameOf(path) {
+    const p = String(path || "")
+    if (p === "/" || p === "")
+        return ""
+    return p.substring(p.lastIndexOf("/") + 1)
+}
+
+// A child path inside `folder`. `name` must already be one sanitized segment.
+function childPath(folder, name) {
+    const f = String(folder || "/")
+    return (f === "/" ? "" : f) + "/" + String(name || "")
+}
+
+// True when `path` is a strict descendant of `folder` — a child, a grandchild,
+// any depth, but not the folder itself.
+function isUnder(path, folder) {
+    const p = String(path || "")
+    const f = String(folder || "/")
+    if (f === "/")
+        return p !== "/" && p.indexOf("/") === 0
+    return p.indexOf(f + "/") === 0
+}
+
+// Paths are rebuilt from an encrypted index that may have been tampered with,
+// so they are re-validated before anything is built from them: absolute, one
+// sane segment at a time, no traversal, no control or bidi characters.
+function validVaultPath(path) {
+    const p = String(path || "")
+    if (p === "/")
+        return true
+    if (p.indexOf("/") !== 0)
+        return false
+    const segs = p.substring(1).split("/")
+    for (let i = 0; i < segs.length; i++) {
+        const s = segs[i]
+        if (s === "" || s === "." || s === ".." || s.length > 240)
+            return false
+        if (/[<>\u0000-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/.test(s))
+            return false
+    }
+    return true
+}
+
+// The direct children of `folder`, folders first then files, each alphabetical
+// — the listing a file explorer shows for that folder.
+function childrenOf(items, folder) {
+    const f = String(folder || "/")
+    const out = []
+    if (!items)
+        return out
+    for (let i = 0; i < items.length; i++) {
+        const it = items[i]
+        if (it && parentOf(it.path) === f)
+            out.push(it)
+    }
+    out.sort(function (a, b) {
+        if (a.isDir !== b.isDir)
+            return a.isDir ? -1 : 1
+        const an = String(a.name || baseNameOf(a.path)).toLowerCase()
+        const bn = String(b.name || baseNameOf(b.path)).toLowerCase()
+        return an < bn ? -1 : an > bn ? 1 : 0
+    })
+    return out
+}
+
+// File count and total bytes under `folder` (folders carry no bytes).
+function subtreeStats(items, folder) {
+    const out = { files: 0, bytes: 0 }
+    if (!items)
+        return out
+    for (let i = 0; i < items.length; i++) {
+        const it = items[i]
+        if (it && !it.isDir && isUnder(it.path, folder)) {
+            out.files++
+            out.bytes += clampInt(it.size, 0, 0, Number.MAX_SAFE_INTEGER)
+        }
+    }
+    return out
+}
+
+// Breadcrumb chain for a vault path, root first: "/photos/cat.jpg" →
+// [{path: "/", name: ""}, {path: "/photos", name: "photos"}, …].
+function pathSegments(path) {
+    const p = String(path || "/")
+    const out = [{ path: "/", name: "" }]
+    if (p === "/" || p === "")
+        return out
+    const segs = p.substring(1).split("/")
+    let acc = ""
+    for (let i = 0; i < segs.length; i++) {
+        if (segs[i] === "")
+            continue
+        acc += "/" + segs[i]
+        out.push({ path: acc, name: segs[i] })
+    }
+    return out
+}
+
+// --- disk paths ----------------------------------------------------------------
 
 // Last path segment, tolerating a trailing slash on directory drops.
 function basename(path) {

@@ -7,10 +7,11 @@
 | ![Locked card](locked.png) | ![Change password card](change-password.png) |
 
 An encrypted drop-safe for Omarchy's bar. Drag files, media, or whole folders
-onto the safe and they are locked away: each item is encrypted with
+onto the safe and they are locked away: each file is encrypted with
 AES-256-CBC (PBKDF2, 250k iterations) and the original is removed. Opening
-the safe lists what is inside and lets you unlock items back to
-`~/Downloads/OmaSafe` or destroy them.
+the safe shows a small file explorer — browse folders, switch between list
+and grid, and drop files into the folder you're looking at — and lets you
+unlock items back to `~/Downloads/OmaSafe` or destroy them.
 
 ## Install
 
@@ -21,8 +22,15 @@ omarchy plugin add https://github.com/palccod/OmaSafe --enable
 ## How it works
 
 - **Lock something away** — drag files or folders onto the bar icon (works
-  mid-drag, no click needed first) or onto the open card. Symlinks are
-  refused; everything else is fair game.
+  mid-drag, no click needed first), onto the open card, or straight onto a
+  folder inside the card to file it there. Symlinks are refused; everything
+  else is fair game.
+- **Browse** — folders are stored as real structure (one encrypted blob per
+  file), so clicking a folder shows its contents instantly, with nothing
+  decrypted until you take an item out. Drop files while a folder is open and
+  they land inside it. Safes from before 0.4.0 stored a folder as one tar
+  blob; on the first unlock they are upgraded to the browsable layout
+  automatically.
 - **Unlock** — click the shield and type your password. A back-up key
   (64 hex digits) also opens the safe and is stored nowhere; if you lose
   both the password and the key, the contents are gone.
