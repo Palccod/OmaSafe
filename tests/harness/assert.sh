@@ -25,6 +25,12 @@ for p in '/legacy' '/legacy/one.txt' '/legacy/deeper/two.txt'; do
   grep -q "\"path\":\"$p\"" /tmp/xtest-index.json
   [ $? -ne 0 ]; check "index no longer has $p" $?
 done
+grep -q '"path":"/partial/y.txt"' /tmp/xtest-index.json
+check "index has /partial/y.txt" $?
+grep -q '"path":"/partial/x.txt"' /tmp/xtest-index.json
+[ $? -ne 0 ]; check "unreadable file was skipped" $?
+[ -f home/dropbox/partial/y.txt ] && [ -f home/dropbox/partial/x.txt ]
+check "partial-failure original tree kept on disk" $?
 # 3. the tar blob was deleted after the migration
 TARID=$(cat tarid.txt)
 [ ! -f "$V/$TARID" ]; check "legacy tar blob deleted" $?

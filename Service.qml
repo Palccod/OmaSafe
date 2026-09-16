@@ -115,7 +115,7 @@ Item {
     readonly property int maxVaultItems: 4096
     // One recursive folder drop may queue at most this many file encryptions;
     // larger trees are refused whole rather than half-stashed.
-    readonly property int maxStashFiles: 200
+    readonly property int maxStashFiles: 500
 
     // --- the job queue --------------------------------------------------------
     //
@@ -1069,9 +1069,12 @@ Item {
         const out = []
         for (const d of dirs)
             out.push({ id: "", path: d, isDir: true, legacy: false, size: 0, addedAt: entry.addedAt })
-        root._encryptList(files, "Upgrading the safe…", newFiles => {
+        root._encryptList(files, "Upgrading the safe…", true, (newFiles, failed) => {
             _enqueue(["rm", "-rf", "--", srcDir], {}, () => {
-                if (newFiles === null) {
+                // Strict mode: null means a failure (or a lock) — the upgrade
+                // aborts whole and retries next unlock, with the old tar
+                // blob still intact.
+                if (newFiles === null || failed > 0) {
                     done(null)
                     return
                 }
@@ -1083,43 +1086,61 @@ Item {
     }
 
     // Encrypts files one by one into fresh blobs. `files` is
-    // [{disk, vaultPath, size}]; done(entries|null) receives finished index
-    // entries, or null when the safe locked or a job failed — earlier blobs
-    // survive as orphans, which are harmless.
-    function _encryptList(files, label, done, gen) {
+    // [{disk, vaultPath, size}].
+    //
+    // In strict mode (the legacy upgrade) any failure aborts the run — a
+    // partial migration would lose the failed files with the old tar blob,
+    // so it must be all or nothing, retried next unlock.
+    //
+    // Outside strict mode a file that cannot be read is skipped and counted:
+    // the rest of the folder still lands in the safe, and the summary names
+    // the shortfall. done(entries, failed) receives the finished entries and
+    // the failure count, or done(null, 0) when the safe locked mid-run —
+    // earlier blobs survive as orphans, which are harmless.
+    function _encryptList(files, label, strict, done, gen) {
         const out = []
         let idx = 0
+        let failed = 0
         const step = () => {
             if (root._stale(gen)) {
-                done(null)
+                done(null, 0)
                 return
             }
             if (idx >= files.length) {
-                done(out)
+                done(out, failed)
                 return
             }
             const f = files[idx]
             idx++
             root.busyLabel = label + " " + idx + "/" + files.length
+            const fail = () => {
+                if (strict) {
+                    root.busyLabel = ""
+                    done(null, 0)
+                    return
+                }
+                failed++
+                step()
+            }
             _hexJob(16, id => {
                 if (!/^[0-9a-f]{32}$/.test(id)) {
-                    root.busyLabel = ""
-                    done(null)
+                    fail()
                     return
                 }
                 if (root._stale(gen)) {
-                    done(null)
+                    done(null, 0)
                     return
                 }
                 _enqueue(_cipherArgv(f.disk, root.vaultDir + "/" + id, "OS_KEY", false),
                          { OS_KEY: root.sessionKey }, (ec, eo) => {
                     if (root._stale(gen)) {
-                        done(null)
+                        done(null, 0)
                         return
                     }
                     if (ec !== 0) {
-                        root.busyLabel = ""
-                        done(null)
+                        // Clean the partial blob; counting continues below.
+                        _enqueue(["rm", "-f", "--", root.vaultDir + "/" + id], {}, null)
+                        fail()
                         return
                     }
                     out.push({ id: id, path: f.vaultPath, isDir: false, legacy: false,
@@ -1382,7 +1403,7 @@ Item {
             }
             if (tooBig) {
                 root._emitToast(name + " holds more than " + root.maxStashFiles
-                                + " files — refused whole, nothing was changed")
+                                + " files — it was refused whole. Split it up or add it in parts.")
                 return
             }
             // Structure entries: the found dirs plus every ancestor a file
@@ -1415,10 +1436,10 @@ Item {
                     if (d !== target)
                         entries.push({ id: "", path: d, isDir: true, legacy: false,
                                        size: 0, addedAt: Date.now() })
-                _commitEntries(entries, origPath, gen)
+                _commitEntries(entries, origPath, gen, "Locked " + name, false)
                 return
             }
-            _encryptList(files, "Locking " + name + "…", newFiles => {
+            _encryptList(files, "Locking " + name + "…", false, (newFiles, failed) => {
                 if (newFiles === null)
                     return
                 const entries = [{ id: "", path: target, isDir: true, legacy: false,
@@ -1429,15 +1450,29 @@ Item {
                                        size: 0, addedAt: Date.now() })
                 for (const f of newFiles)
                     entries.push(f)
-                _commitEntries(entries, origPath, gen)
+                let doneLabel
+                let keepOriginal = false
+                if (failed > 0) {
+                    // The whole tree stays on disk: a blanket rm -rf would
+                    // take the failed files' originals with it.
+                    keepOriginal = true
+                    doneLabel = "Locked " + newFiles.length + " of " + files.length
+                                + " files from " + name + " — the original folder was kept"
+                } else if (files.length > 1)
+                    doneLabel = "Locked " + name + " (" + files.length + " files)"
+                else
+                    doneLabel = "Locked " + name
+                _commitEntries(entries, origPath, gen, doneLabel, keepOriginal)
             }, gen)
         })
     }
 
     // Appends finished entries to the index in a single write, then removes
-    // the original. Callers have gen-guarded their way here; the write
+    // the original — unless `keepOriginal` is set (a partial run must not
+    // delete the files that failed to stash). `doneLabel` is the summary for
+    // the success toast. Callers have gen-guarded their way here; the write
     // re-checks on its own.
-    function _commitEntries(entries, originalPath, gen) {
+    function _commitEntries(entries, originalPath, gen, doneLabel, keepOriginal) {
         if (root._stale(gen)) {
             root.busyLabel = ""
             root._emitToast("The safe locked — nothing was recorded, the original was kept")
@@ -1447,20 +1482,20 @@ Item {
         for (const e of entries)
             list.push(e)
         root.items = list
-        const label = SafeModel.baseNameOf(entries[0].path)
+        const name = SafeModel.baseNameOf(entries[0].path)
         _writeIndex(ok => {
             root.busyLabel = ""
             if (!ok) {
                 root._emitToast("Encrypted, but the index could not be updated — do not delete the original")
                 return
             }
-            if (_deletable(originalPath)) {
+            if (!keepOriginal && _deletable(originalPath)) {
                 _enqueue(["rm", "-rf", "--", originalPath], {}, (rc, ro) => {
-                    root._emitToast(rc === 0 ? "Locked " + label
-                                             : "Locked " + label + " — the original could not be removed")
+                    root._emitToast(rc === 0 ? doneLabel
+                                             : doneLabel + " — the original could not be removed")
                 })
             } else {
-                root._emitToast("Locked a copy of " + label)
+                root._emitToast(keepOriginal ? doneLabel : "Locked a copy of " + name)
             }
         })
     }

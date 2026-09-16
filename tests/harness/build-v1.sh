@@ -16,6 +16,14 @@ printf 'extra payload\n' > home/dropbox/extra.txt
 printf 'one\n' > home/dropbox/legacy/one.txt
 printf 'two\n' > home/dropbox/legacy/deeper/two.txt
 
+# Partial-failure fixture: y.txt stashes fine, x.txt is unreadable (mode 000)
+# and must be skipped without sinking the rest of the folder — and the
+# original tree must be kept so the unreadable file survives.
+mkdir -p home/dropbox/partial
+printf 'readable\n' > home/dropbox/partial/y.txt
+printf 'locked out\n' > home/dropbox/partial/x.txt
+chmod 000 home/dropbox/partial/x.txt
+
 # The v1 vault: vault key wrapped under the password, the legacy folder as one
 # tar blob, the root file as a second blob, and a version-1 index.
 K=$(openssl rand -hex 32)

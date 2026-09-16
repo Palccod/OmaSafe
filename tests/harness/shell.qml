@@ -108,6 +108,13 @@ Item {
             done: () => true
         },
         {
+            label: "an unreadable file is skipped, the rest still land",
+            enter: () => { svc.stash([root.drop + "/partial"]) },
+            done: () => root.has("/partial")
+                         && root.has("/partial/y.txt")
+                         && !root.has("/partial/x.txt")
+        },
+        {
             label: "folder extract recreates the subtree",
             enter: () => { svc.extractAt("/tree") },
             done: () => true

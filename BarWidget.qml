@@ -163,6 +163,34 @@ Panel {
         onTriggered: if (root.barDropActive) root.open()
     }
 
+    // A Wayland drag that ends on another surface (or whose source dies) can
+    // leave a DropArea without its exit event, and the icon would sit on the
+    // drop glyph forever. Any real drag move re-enters well within a minute,
+    // so a minute of silence means the highlights are orphans.
+    Timer {
+        id: dropFlagWatchdog
+        interval: 60000
+        onTriggered: {
+            root.barDropActive = false
+            root.cardDropActive = false
+            springTimer.stop()
+        }
+    }
+
+    onBarDropActiveChanged: {
+        if (barDropActive || cardDropActive)
+            dropFlagWatchdog.restart()
+        else
+            dropFlagWatchdog.stop()
+    }
+
+    onCardDropActiveChanged: {
+        if (barDropActive || cardDropActive)
+            dropFlagWatchdog.restart()
+        else
+            dropFlagWatchdog.stop()
+    }
+
     function copyBackupKey() {
         if (!root.svc || root.svc.pendingBackupKey === "")
             return
@@ -184,6 +212,7 @@ Panel {
         hasVisualContent: true
         dimmed: !root.unlocked && !root.opened
         tooltipText: !root.svc ? "OmaSafe"
+            : root.svc.busy ? "OmaSafe — " + root.svc.busyLabel
             : root.showSetup ? "OmaSafe — no safe yet"
             : root.unlocked ? "OmaSafe — unlocked, " + (root.svc.itemCount === 1 ? "1 item" : root.svc.itemCount + " items")
             : "OmaSafe — locked"
@@ -196,6 +225,7 @@ Panel {
         }
 
         Text {
+            id: iconGlyph
             anchors.centerIn: parent
             width: parent.width
             text: root.barDropActive || root.cardDropActive ? root.glyphDrop
@@ -208,6 +238,30 @@ Panel {
                    ? Color.accent : button.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.iconLarge
+
+            // The icon breathes while the safe is mid-job, so a long folder
+            // drop is visibly alive with the card closed; the tooltip carries
+            // the live "k/N" progress.
+            SequentialAnimation {
+                running: !!root.svc && root.svc.busy
+                         && !root.barDropActive && !root.cardDropActive
+                loops: Animation.Infinite
+                alwaysRunToEnd: true
+                NumberAnimation {
+                    target: iconGlyph
+                    property: "opacity"
+                    to: 0.35
+                    duration: 550
+                    easing.type: Easing.InOutQuad
+                }
+                NumberAnimation {
+                    target: iconGlyph
+                    property: "opacity"
+                    to: 1
+                    duration: 550
+                    easing.type: Easing.InOutQuad
+                }
+            }
         }
 
         // Dropping straight on the icon is the whole point: you are already
@@ -225,16 +279,24 @@ Panel {
 
             onExited: {
                 root.barDropActive = false
+                root.cardDropActive = false
                 springTimer.stop()
             }
 
             onDropped: drop => {
+                // A drop that crosses surfaces can leave the other surface's
+                // exit event undelivered; both highlights die with any drop.
                 root.barDropActive = false
+                root.cardDropActive = false
                 springTimer.stop()
                 if (!root.svc)
                     return
                 const entries = drop.hasUrls ? drop.urls : String(drop.text).split("\n")
                 if (root.svc.phase !== "unlocked")
+                    root.open()
+                else if (!root.opened)
+                    // Show the run: a folder drop can take minutes, and the
+                    // card is where the progress lives.
                     root.open()
                 root.svc.stash(entries, root.svc.currentFolder)
                 if (drop.hasUrls)
@@ -282,10 +344,15 @@ Panel {
                     root.cardDropActive = true
                 }
 
-                onExited: root.cardDropActive = false
+                onExited: {
+                    root.cardDropActive = false
+                    root.barDropActive = false
+                }
 
                 onDropped: drop => {
                     root.cardDropActive = false
+                    root.barDropActive = false
+                    springTimer.stop()
                     if (!root.svc)
                         return
                     const entries = drop.hasUrls ? drop.urls : String(drop.text).split("\n")
