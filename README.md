@@ -90,7 +90,9 @@ password you pick, distinct from the login keyring your session unlocks.
 Consequences worth knowing:
 
 - Reading the copy requires the keyring's password, entered into the native
-  GNOME keyring dialog; an unlocked session alone never exposes it.
+  GNOME keyring dialog; an unlocked session alone never exposes it. The
+  plugin re-locks the keyring after every save and recovery, so each use
+  asks for that password again.
 - Anything that *can* satisfy that dialog can open the safe. If you forget
   both the vault password and the keyring password, the keyring copy is
   useless — the paper/password-manager copy of the back-up key remains the

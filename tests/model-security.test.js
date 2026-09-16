@@ -60,3 +60,13 @@ test("keyring copies travel through the environment, never argv", () => {
     // The recovery search uses fixed attributes; no secret in argv.
     assert.match(service, /"secret-tool", "search", "--unlock",[\s\S]*?"application", "omasafe", "item", "backup"/)
 })
+
+test("the dedicated keyring is re-locked after every use", () => {
+    const service = readFileSync(new URL("../Service.qml", import.meta.url), "utf8")
+    // The save flow locks the keyring again whether or not the store worked.
+    assert.match(service, /_keyringStoreIn\(path, key, ok => _keyringLock\(path, \(\) => finish\(ok\)\)\)/)
+    assert.match(service, /_keyringStoreIn\(p2, key, ok => _keyringLock\(p2, \(\) => finish\(ok\)\)\)/)
+    // Recovery locks first thing after the search, prompt or no prompt.
+    assert.match(service, /_keyringLock\(root\.keyringPath, null\)/)
+    assert.match(service, /"Lock", "ao", "1"/)
+})

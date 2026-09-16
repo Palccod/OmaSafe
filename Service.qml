@@ -1911,8 +1911,29 @@ Item {
                  { OS_RK: key }, (code, out) => done(code === 0), 180000)
     }
 
+    // Locks the dedicated keyring again. Unlocking a collection leaves it
+    // open for the rest of the session, so a recovery right after a save
+    // would read the copy with no prompt at all — the keyring must sit
+    // behind its password except during the exact operation using it.
+    // Locking needs no password, so this always runs, no-op included.
+    function _keyringLock(path, done) {
+        if (!SafeModel.validKeyringPath(path)) {
+            if (done)
+                done(false)
+            return
+        }
+        _enqueue(["busctl", "--user", "call", "org.freedesktop.secrets",
+                  "/org/freedesktop/secrets", "org.freedesktop.Secret.Service",
+                  "Lock", "ao", "1", path], {}, (code, out) => {
+            if (done)
+                done(code === 0)
+        })
+    }
+
     // The banner button: copy the pending back-up key into the dedicated
-    // keyring, creating the keyring first when it does not exist yet.
+    // keyring, creating the keyring first when it does not exist yet. The
+    // keyring is locked again afterwards whatever happened, so the next
+    // use always asks for its password.
     function keyringSavePendingKey() {
         const key = root.pendingBackupKey
         if (!SafeModel.isHex64(key) || root.busy)
@@ -1929,7 +1950,7 @@ Item {
         root.busyLabel = "Saving in the keyring…"
         _keyringFind(path => {
             if (path !== "") {
-                _keyringStoreIn(path, key, finish)
+                _keyringStoreIn(path, key, ok => _keyringLock(path, () => finish(ok)))
                 return
             }
             root.busyLabel = "Creating the keyring — choose its password in the dialog…"
@@ -1940,7 +1961,7 @@ Item {
                 }
                 _keyringFind(p2 => {
                     root.busyLabel = "Saving in the keyring…"
-                    _keyringStoreIn(p2, key, finish)
+                    _keyringStoreIn(p2, key, ok => _keyringLock(p2, () => finish(ok)))
                 })
             })
         })
@@ -1959,6 +1980,9 @@ Item {
         const gen = root._generation
         _enqueue(["secret-tool", "search", "--unlock",
                   "application", "omasafe", "item", "backup"], {}, (code, out) => {
+            // Re-lock first, whatever the search did: a prompted unlock
+            // must not leave the keyring open for the rest of the session.
+            _keyringLock(root.keyringPath, null)
             if (root._stale(gen))
                 return
             root.busyLabel = ""
