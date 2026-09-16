@@ -65,6 +65,14 @@ Item {
     // True while this session was opened with the back-up key rather than
     // the password — the card then offers a password change up front.
     property bool unlockedViaRecovery: false
+    // The dedicated "OmaSafe" keyring: an optional copy of the back-up key
+    // behind the keyring's own password (the session never unlocks it).
+    // keyringPath is the Secret Service collection path, "" while no such
+    // keyring exists; keyringLastSaveKey records which back-up key the
+    // keyring copy holds, so the banner can tell "saved" from "stale".
+    property string keyringPath: ""
+    property bool keyringAvailable: false
+    property string keyringLastSaveKey: ""
     // Manifest entries while unlocked: [{id, path, isDir, size, addedAt}]
     // where `path` is vault-absolute ("/photos/cat.jpg"); only files carry
     // an `id` (their blob). Folder entries are structural markers.
@@ -134,13 +142,14 @@ Item {
     // index would silently become readable by anyone.
     property int _generation: 0
 
-    function _enqueue(argv, env, done) {
-        _queue.push({ argv: argv, env: env || ({}), done: done || null })
+    function _enqueue(argv, env, done, timeoutMs) {
+        _queue.push({ argv: argv, env: env || ({}), done: done || null,
+                       timeoutMs: timeoutMs || 0 })
         _pump()
     }
 
     // True when `gen` was captured before the most recent lock — every
-    // callback that carries one must stop the moment this flips.
+    // callback that carries one must stop the moment it flips.
     function _stale(gen) {
         return gen !== root._generation
     }
@@ -151,6 +160,7 @@ Item {
         _job = _queue.shift()
         worker.environment = _job.env
         worker.command = _job.argv
+        watchdog.interval = _job.timeoutMs > 0 ? _job.timeoutMs : 120000
         worker.running = true
         watchdog.restart()
     }
@@ -1827,6 +1837,142 @@ Item {
                 })
             })
         })
+    }
+
+    // --- keyring (optional copy of the back-up key) -----------------------------
+    //
+    // The back-up key can be copied into a dedicated keyring ("OmaSafe"),
+    // apart from the session-unlocked default: the keyring keeps its own
+    // password, nothing opens it at login, and reading it pops the native
+    // keyring dialog. The copy is strictly a convenience for a lost
+    // password — the vault's wraps never depend on it, and deleting the
+    // keyring or its item from a keyring manager revokes nothing.
+
+    // Finds the dedicated keyring by label. The script is a constant; the
+    // daemon mangles collection names into safe path segments, and the
+    // discovered path is validated before anything else ever sees it.
+    function _keyringFind(done) {
+        _enqueue(["sh", "-c",
+                  'busctl --user get-property org.freedesktop.secrets /org/freedesktop/secrets '
+                + 'org.freedesktop.Secret.Service Collections 2>/dev/null '
+                + '| grep -o \'/org/freedesktop/secrets/collection/[^" ]*\' '
+                + '| while IFS= read -r p; do '
+                + 'busctl --user get-property org.freedesktop.secrets "$p" '
+                + 'org.freedesktop.Secret.Collection Label 2>/dev/null '
+                + '| grep -q \'"OmaSafe"\' && printf \'%s\\n\' "$p"; done | head -n 1',
+                  "omasafe-keyring-find"], {}, (code, out) => {
+            const p = String(out || "").trim()
+            done(SafeModel.validKeyringPath(p) ? p : "")
+        })
+    }
+
+    // Cheap existence probe for the card: is the dedicated keyring there?
+    // Runs when the popout opens (and after any lock) so the unlock view
+    // can offer keyring recovery.
+    function probeKeyring() {
+        _keyringFind(p => {
+            root.keyringPath = p
+            root.keyringAvailable = p !== ""
+        })
+    }
+
+    function _keyringHelperPath() {
+        const u = Qt.resolvedUrl("keyring-create.py").toString()
+        return u.indexOf("file://") === 0 ? u.substring(7) : u
+    }
+
+    // One-time creation of the dedicated keyring. Creating a Secret
+    // Service collection needs CreateCollection plus the caller-bound
+    // Prompt on one D-Bus connection, which no single-shot CLI can do —
+    // hence the shipped helper. The native dialog collects the new
+    // keyring's password, which never passes through the safe at all.
+    function _keyringCreate(done) {
+        _enqueue(["python3", root._keyringHelperPath()], {}, (code, out) => {
+            const status = String(out || "").split("\n")[0].trim()
+            done(code === 0 && status === "created")
+        }, 330000)
+    }
+
+    // Stores the key into the dedicated keyring. The key rides the
+    // environment into secret-tool's stdin — never argv, never a file —
+    // and the store is refused unless the key is still the one on screen:
+    // a rotation that landed mid-flow must not leave the old back-up key
+    // in the keyring looking current.
+    function _keyringStoreIn(path, key, done) {
+        if (!SafeModel.validKeyringPath(path) || !SafeModel.isHex64(key)
+                || root.pendingBackupKey !== key) {
+            done(false)
+            return
+        }
+        _enqueue(["sh", "-c",
+                  'printf \'%s\' "$OS_RK" | secret-tool store '
+                + '--label=\'OmaSafe back-up key\' -c "$1" application omasafe item backup',
+                  "omasafe-keyring-store", path],
+                 { OS_RK: key }, (code, out) => done(code === 0), 180000)
+    }
+
+    // The banner button: copy the pending back-up key into the dedicated
+    // keyring, creating the keyring first when it does not exist yet.
+    function keyringSavePendingKey() {
+        const key = root.pendingBackupKey
+        if (!SafeModel.isHex64(key) || root.busy)
+            return false
+        const finish = ok => {
+            root.busyLabel = ""
+            if (!ok) {
+                root._emitToast("Could not save the back-up key in the keyring")
+                return
+            }
+            root.keyringLastSaveKey = key
+            root._emitToast("Back-up key saved in the OmaSafe keyring")
+        }
+        root.busyLabel = "Saving in the keyring…"
+        _keyringFind(path => {
+            if (path !== "") {
+                _keyringStoreIn(path, key, finish)
+                return
+            }
+            root.busyLabel = "Creating the keyring — choose its password in the dialog…"
+            _keyringCreate(ok => {
+                if (!ok) {
+                    finish(false)
+                    return
+                }
+                _keyringFind(p2 => {
+                    root.busyLabel = "Saving in the keyring…"
+                    _keyringStoreIn(p2, key, finish)
+                })
+            })
+        })
+        return true
+    }
+
+    // The unlock card's keyring path: ask the Secret Service for the saved
+    // back-up key. A locked keyring pops the native unlock dialog, so the
+    // job gets a long deadline; the value must come back as a full 64-hex
+    // key before it is handed to the normal back-up-key unlock.
+    function recoverFromKeyring() {
+        if (root.phase !== "locked" || root.busy)
+            return false
+        root.lastError = ""
+        root.busyLabel = "Opening the keyring…"
+        const gen = root._generation
+        _enqueue(["secret-tool", "search", "--unlock",
+                  "application", "omasafe", "item", "backup"], {}, (code, out) => {
+            if (root._stale(gen))
+                return
+            root.busyLabel = ""
+            const key = SafeModel.parseKeyringSecret(out)
+            if (!SafeModel.isHex64(key)) {
+                // Covers a canceled dialog, a wrong keyring password, and a
+                // missing or stale item alike — none needs its own words.
+                root.lastError = "The keyring did not give up the back-up key"
+                return
+            }
+            root.busyLabel = "Unlocking…"
+            _unlockWithKey(key, gen)
+        }, 330000)
+        return true
     }
 
     // --- IPC -------------------------------------------------------------------

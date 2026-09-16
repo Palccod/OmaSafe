@@ -11,7 +11,7 @@ T=/tmp/omasafe-xtest
 
 rm -rf "$T"
 mkdir -p "$T/home" "$T/data" "$T/state"
-cp "$REPO/Service.qml" "$REPO/SafeModel.js" \
+cp "$REPO/Service.qml" "$REPO/SafeModel.js" "$REPO/keyring-create.py" \
    "$REPO/tests/harness/shell.qml" \
    "$REPO/tests/harness/build-v1.sh" \
    "$REPO/tests/harness/assert.sh" "$T/"

@@ -213,6 +213,28 @@ function formatKey(key) {
     return groups.join(" ")
 }
 
+// A Secret Service collection path, exactly as the daemon reports them:
+// "/org/freedesktop/secrets/collection/<mangled-name>". Only this shape is
+// ever handed back to the shell — the daemon mangles names into safe path
+// segments, so a validated path needs no further quoting as an argument.
+function validKeyringPath(path) {
+    return /^\/org\/freedesktop\/secrets\/collection\/[A-Za-z0-9_]+$/.test(String(path || ""))
+}
+
+// The last "secret = <value>" line of `secret-tool search` output, accepted
+// only when it is a full 64-hex key — the vault treats the tool's output
+// like any other untrusted input, and a stale or hand-edited keyring item
+// must never reach the unlock path half-validated.
+function parseKeyringSecret(output) {
+    const lines = String(output || "").split("\n")
+    let secret = ""
+    for (const line of lines) {
+        if (line.indexOf("secret = ") === 0)
+            secret = line.substring(9).trim()
+    }
+    return isHex64(secret) ? secret : ""
+}
+
 // file:// url for a drag payload or clipboard, percent-encoding each path
 // segment so spaces and unicode names survive the trip.
 function urlFromPath(path) {

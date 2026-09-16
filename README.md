@@ -40,6 +40,14 @@ omarchy plugin add https://github.com/palccod/OmaSafe --enable
   rewritten and a brand-new back-up key is issued, shown exactly once. The
   old back-up key stops working immediately; the encrypted items themselves
   are not touched.
+- **Keyring back-up (optional)** — while the back-up key is on screen,
+  "Save in a keyring" copies it into a dedicated `OmaSafe` keyring with its
+  own password — one that logging in does **not** unlock. If the vault
+  password is ever lost, "Recover from the keyring" on the unlock card pops
+  the keyring's password dialog and opens the safe with the copy. Changing
+  the password issues a fresh back-up key, so the banner offers to refresh
+  the keyring copy too. Deleting the keyring or its item (from seahorse or
+  any keyring manager) revokes nothing — the vault never depends on it.
 - **Drag out** — press an item in the card and drag it straight into any
   window (file manager, editor, chat): the item is decrypted to a tmpfs
   staging area and the drag carries a normal `file://` url, so the target
@@ -74,6 +82,23 @@ upgraded automatically on their first unlock: a fresh back-up key is issued
 and shown once, and the old key (which was the raw vault key) is no longer
 accepted.
 
+### The keyring copy
+
+The optional keyring back-up stores the back-up key in a dedicated
+`OmaSafe` keyring — a separate collection in your secret service with a
+password you pick, distinct from the login keyring your session unlocks.
+Consequences worth knowing:
+
+- Reading the copy requires the keyring's password, entered into the native
+  GNOME keyring dialog; an unlocked session alone never exposes it.
+- Anything that *can* satisfy that dialog can open the safe. If you forget
+  both the vault password and the keyring password, the keyring copy is
+  useless — the paper/password-manager copy of the back-up key remains the
+  real back-up.
+- A password change invalidates the keyring copy until you re-save it (the
+  banner reminds you); recovery with a stale copy simply fails, it never
+  half-unlocks.
+
 ## Preferences
 
 Toggles live at the bottom of the card:
@@ -100,6 +125,12 @@ one or many.
 Nothing beyond Omarchy itself: encryption uses the system `openssl`,
 archiving uses `tar`, and the clipboard copy uses `wl-copy`.
 
+The optional keyring back-up additionally needs a Secret Service
+(gnome-keyring) with `secret-tool` (libsecret), and `python3` with GObject
+introspection for the one-time keyring creation. Without them the rest of
+the plugin works unchanged and the keyring buttons simply stay out of the
+way.
+
 ## Remove
 
 ```bash
@@ -112,4 +143,6 @@ Removing the plugin leaves the vault in place — delete
 ## License
 
 MIT — see [LICENSE](LICENSE). External dependencies: system `openssl`, `tar`,
-and `wl-copy` (wl-clipboard); no bundled binaries, no network access.
+and `wl-copy` (wl-clipboard); optionally `secret-tool` (libsecret) and
+`python3` + GObject introspection for the keyring back-up. No bundled
+binaries, no network access.

@@ -47,3 +47,16 @@ test("runtime source declares bounded inputs and stronger new passwords", () => 
     assert.match(service, /newPassword\.length < 12/)
     assert.match(widget, /Password \(12\+ characters\)/)
 })
+
+test("keyring copies travel through the environment, never argv", () => {
+    const service = readFileSync(new URL("../Service.qml", import.meta.url), "utf8")
+    // The store script pipes the key from an env var into secret-tool stdin.
+    assert.match(service, /printf \\'%s\\' "\$OS_RK" \| secret-tool store/)
+    // A rotation that landed mid-flow must not leave the old key current.
+    assert.match(service, /root\.pendingBackupKey !== key/)
+    // Keyring answers are re-validated before they reach the unlock path.
+    assert.match(service, /SafeModel\.parseKeyringSecret/)
+    assert.match(service, /SafeModel\.validKeyringPath/)
+    // The recovery search uses fixed attributes; no secret in argv.
+    assert.match(service, /"secret-tool", "search", "--unlock",[\s\S]*?"application", "omasafe", "item", "backup"/)
+})

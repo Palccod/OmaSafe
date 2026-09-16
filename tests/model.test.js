@@ -178,3 +178,30 @@ test("subtree stats count files and bytes at any depth", () => {
   assert.equal(stats("/"), "3 files / 310 bytes");
   assert.equal(stats("/docs"), "0 files / 0 bytes");
 });
+
+test("keyring collection paths accept only Secret Service paths", () => {
+  assert.equal(model.validKeyringPath("/org/freedesktop/secrets/collection/omasafe"), true);
+  assert.equal(model.validKeyringPath("/org/freedesktop/secrets/collection/Default_5fKeyring"), true);
+  assert.equal(model.validKeyringPath(""), false);
+  assert.equal(model.validKeyringPath(null), false);
+  assert.equal(model.validKeyringPath("/org/freedesktop/secrets/collection/"), false);
+  assert.equal(model.validKeyringPath("/org/freedesktop/secrets/collection/omasafe/1"), false);
+  assert.equal(model.validKeyringPath("/org/freedesktop/secrets/collection/omsafe; rm -rf /"), false);
+  assert.equal(model.validKeyringPath("file:///etc/passwd"), false);
+});
+
+test("parseKeyringSecret accepts only the last full 64-hex secret line", () => {
+  const KEY = "0123456789abcdef".repeat(4);
+  const out = [
+    "[/6]",
+    "label = OmaSafe back-up key",
+    "secret = " + KEY,
+    "schema = org.freedesktop.Secret.Generic",
+  ].join("\n");
+  assert.equal(model.parseKeyringSecret(out), KEY);
+  assert.equal(model.parseKeyringSecret("secret = nothexpassword\n"), "");
+  assert.equal(model.parseKeyringSecret("secret = " + KEY + "\nsecret = short\n"), "");
+  assert.equal(model.parseKeyringSecret("label = fake\ncreated = 2020\n"), "");
+  assert.equal(model.parseKeyringSecret(""), "");
+  assert.equal(model.parseKeyringSecret(null), "");
+});

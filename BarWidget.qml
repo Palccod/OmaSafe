@@ -54,6 +54,10 @@ Panel {
     readonly property bool showChangePw: !showBackup && changePwOpen && unlocked
     readonly property bool showContents: !showBackup && !changePwOpen && phase === "unlocked"
     readonly property bool unlocked: phase === "unlocked"
+    // True while the keyring copy holds exactly the back-up key on screen;
+    // a rotation flips it back so the banner offers to re-save.
+    readonly property bool keyringSaveDone: !!svc && svc.keyringLastSaveKey !== ""
+        && svc.keyringLastSaveKey === svc.pendingBackupKey
 
     // Per-card UI state.
     property bool cardDropActive: false
@@ -96,6 +100,10 @@ Panel {
             root.changeNew = ""
             root.changeConfirm = ""
             root.changeError = ""
+            // A locked safe can offer keyring recovery — check whether the
+            // dedicated keyring exists before the unlock card shows.
+            if (root.svc && root.svc.phase === "locked")
+                root.svc.probeKeyring()
         }
         // The moment a fresh back-up key is on screen (initial issue or a
         // rotation), the change-password card gives way to it.
@@ -144,6 +152,7 @@ Panel {
             return
         if (opened) {
             root.svc.panelOpened()
+            root.svc.probeKeyring()
         } else {
             root.pointerHasVisited = false
             root.svc.panelClosed()
@@ -656,6 +665,48 @@ Panel {
                                 }
                             }
                         }
+
+                        // Optional third copy: the dedicated keyring keeps the
+                        // back-up key behind its own password, so losing the
+                        // vault password (but not the keyring password) is
+                        // still recoverable.
+                        Rectangle {
+                            width: parent.width
+                            height: keyringBox.implicitHeight + Style.space(20)
+                            radius: Style.space(8)
+                            color: Qt.alpha(Color.accent, 0.08)
+                            border.width: 1
+                            border.color: Qt.alpha(Color.accent, 0.3)
+
+                            Column {
+                                id: keyringBox
+                                anchors.fill: parent
+                                anchors.margins: Style.space(10)
+                                spacing: Style.space(8)
+
+                                Text {
+                                    width: parent.width
+                                    text: root.keyringSaveDone
+                                        ? "A copy is in the OmaSafe keyring — it opens only with that keyring's own password, never with the session."
+                                        : "Or keep a copy in a dedicated OmaSafe keyring. Its password is separate — the session does not unlock it."
+                                    wrapMode: Text.WordWrap
+                                    textFormat: Text.PlainText
+                                    color: root.foreground
+                                    font.family: root.fontFamily
+                                    font.pixelSize: Style.font.bodySmall
+                                }
+
+                                Button {
+                                    width: parent.width
+                                    text: root.keyringSaveDone ? "Saved in the keyring" : "Save in a keyring"
+                                    foreground: root.foreground
+                                    accent: Color.accent
+                                    fontFamily: root.fontFamily
+                                    enabled: !root.svc || (!root.svc.busy && !root.keyringSaveDone)
+                                    onClicked: if (root.svc) root.svc.keyringSavePendingKey()
+                                }
+                            }
+                        }
                     }
 
                     // Unlock -----------------------------------------------------
@@ -716,6 +767,20 @@ Panel {
                             }
 
                             onClicked: activate()
+                        }
+
+                        // One-click recovery when the dedicated keyring
+                        // exists: pops the keyring's password dialog and
+                        // unlocks with the copy it guards.
+                        Button {
+                            width: parent.width
+                            text: "Recover from the keyring"
+                            visible: !!root.svc && root.svc.keyringAvailable
+                            enabled: !root.svc || !root.svc.busy
+                            foreground: root.foreground
+                            accent: Color.accent
+                            fontFamily: root.fontFamily
+                            onClicked: if (root.svc) root.svc.recoverFromKeyring()
                         }
                     }
 
