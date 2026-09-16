@@ -1066,16 +1066,17 @@ Panel {
                                     root.dragOutActive = false
                                 }
 
+                                // A staged folder is a whole-subtree decrypt,
+                                // so it must never run on hover or on a
+                                // plain click-to-navigate — only when the
+                                // pointer actually turns into a drag. Files
+                                // stay cheap and stage on hover, ledge-style.
                                 HoverHandler {
                                     id: rowHover
                                     cursorShape: rowDelegate.browsable ? Qt.PointingHandCursor : Qt.OpenHandCursor
                                     onHoveredChanged: if (hovered) {
                                         rowDelegate.refreshDragImage()
-                                        // Stage on hover, ledge-style: by the
-                                        // time the press turns into a drag the
-                                        // plaintext is usually already on disk,
-                                        // and image chips get their thumbnail.
-                                        if (root.svc)
+                                        if (root.svc && !rowDelegate.isFolder)
                                             root.svc.stageItem(rowDelegate.modelData.path)
                                     }
                                 }
@@ -1096,7 +1097,7 @@ Panel {
                                         pressPoint = Qt.point(mouse.x, mouse.y)
                                         dragging = false
                                         rowDelegate.refreshDragImage()
-                                        if (root.svc)
+                                        if (root.svc && !rowDelegate.isFolder)
                                             root.svc.stageItem(rowDelegate.modelData.path)
                                     }
 
@@ -1108,16 +1109,34 @@ Panel {
                                         if (Math.sqrt(dx * dx + dy * dy) < 10)
                                             return
                                         dragging = true
+                                        if (rowDelegate.isFolder) {
+                                            // The subtree decrypt starts here,
+                                            // at the first real drag motion;
+                                            // beginDrag fires from
+                                            // onStagePathChanged once the
+                                            // plaintext tree is ready.
+                                            if (root.svc)
+                                                root.svc.stageItem(rowDelegate.modelData.path)
+                                            return
+                                        }
                                         rowDelegate.beginDrag()
                                     }
 
                                     onClicked: mouse => {
                                         // A click opens a folder; files stay
                                         // inert — extract and destroy live on
-                                        // the buttons.
-                                        if (rowDelegate.browsable && root.svc)
+                                        // the buttons. A completed drag
+                                        // attempt must not also navigate.
+                                        if (!dragging && rowDelegate.browsable && root.svc)
                                             root.svc.navigate(rowDelegate.modelData.path)
                                     }
+                                }
+
+                                // The drag starts the moment a pressed folder
+                                // finishes staging.
+                                onStagePathChanged: {
+                                    if (rowDrag.dragging && rowDelegate.stagePath !== "")
+                                        rowDelegate.beginDrag()
                                 }
 
                                 Rectangle {
@@ -1328,17 +1347,21 @@ Panel {
                                         root.dragOutActive = false
                                     }
 
+                                    // Same rule as list rows: a folder is only
+                                    // staged when a press turns into a real
+                                    // drag, never on hover or click.
                                     HoverHandler {
                                         id: tileHover
                                         cursorShape: tileDelegate.browsable ? Qt.PointingHandCursor : Qt.OpenHandCursor
                                         onHoveredChanged: if (hovered) {
                                             tileDelegate.refreshDragImage()
-                                            if (root.svc)
+                                            if (root.svc && !tileDelegate.isFolder)
                                                 root.svc.stageItem(tileDelegate.modelData.path)
                                         }
                                     }
 
                                     MouseArea {
+                                        id: tileDrag
                                         anchors.fill: parent
                                         acceptedButtons: Qt.LeftButton
                                         preventStealing: true
@@ -1350,7 +1373,7 @@ Panel {
                                             pressPoint = Qt.point(mouse.x, mouse.y)
                                             dragging = false
                                             tileDelegate.refreshDragImage()
-                                            if (root.svc)
+                                            if (root.svc && !tileDelegate.isFolder)
                                                 root.svc.stageItem(tileDelegate.modelData.path)
                                         }
 
@@ -1362,13 +1385,23 @@ Panel {
                                             if (Math.sqrt(dx * dx + dy * dy) < 10)
                                                 return
                                             dragging = true
+                                            if (tileDelegate.isFolder) {
+                                                if (root.svc)
+                                                    root.svc.stageItem(tileDelegate.modelData.path)
+                                                return
+                                            }
                                             tileDelegate.beginDrag()
                                         }
 
                                         onClicked: mouse => {
-                                            if (tileDelegate.browsable && root.svc)
+                                            if (!dragging && tileDelegate.browsable && root.svc)
                                                 root.svc.navigate(tileDelegate.modelData.path)
                                         }
+                                    }
+
+                                    onStagePathChanged: {
+                                        if (tileDrag.dragging && tileDelegate.stagePath !== "")
+                                            tileDelegate.beginDrag()
                                     }
 
                                     Column {

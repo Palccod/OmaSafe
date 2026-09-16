@@ -407,6 +407,10 @@ Item {
         root._generation++
         root.sessionKey = ""
         root.items = []
+        // Stagings aborted by the lock never reach _stageDone — the in-flight
+        // map must not keep their paths marked busy, or the next session
+        // would silently refuse to stage them again.
+        root._staging = ({})
         root.busyLabel = ""
         root.lastError = ""
         root.unlockedViaRecovery = false
