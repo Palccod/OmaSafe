@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "palccod.omasafe",
   "name": "OmaSafe",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "author": "palccod",
   "license": "MIT",
   "description": "Drag files into the safe — they get encrypted away and only come back with the password.",

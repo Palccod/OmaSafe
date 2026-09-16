@@ -271,6 +271,8 @@ Panel {
             anchors.fill: parent
 
             onEntered: drag => {
+                console.log("omasafe: drag enter bar icon, urls=" + drag.hasUrls
+                            + " text=" + drag.hasText)
                 if (!drag.hasUrls && !drag.hasText)
                     return
                 drag.accept(Qt.CopyAction)
@@ -285,6 +287,7 @@ Panel {
             }
 
             onDropped: drop => {
+                console.log("omasafe: drop on bar icon, urls=" + drop.hasUrls)
                 // A drop that crosses surfaces can leave the other surface's
                 // exit event undelivered; both highlights die with any drop.
                 root.barDropActive = false
@@ -339,6 +342,8 @@ Panel {
                 anchors.fill: parent
 
                 onEntered: drag => {
+                    console.log("omasafe: drag enter card, urls=" + drag.hasUrls
+                                + " text=" + drag.hasText)
                     if (!drag.hasUrls && !drag.hasText)
                         return
                     drag.accept(Qt.CopyAction)
@@ -351,6 +356,7 @@ Panel {
                 }
 
                 onDropped: drop => {
+                    console.log("omasafe: drop on card, urls=" + drop.hasUrls)
                     root.cardDropActive = false
                     root.barDropActive = false
                     springTimer.stop()
@@ -1013,6 +1019,7 @@ Panel {
                                     enabled: rowDelegate.browsable
 
                                     onEntered: drag => {
+                                        console.log("omasafe: drag enter row, urls=" + drag.hasUrls)
                                         if (!drag.hasUrls && !drag.hasText)
                                             return
                                         drag.accept(Qt.CopyAction)
@@ -1022,6 +1029,7 @@ Panel {
                                     onExited: rowDelegate.folderHover = false
 
                                     onDropped: drop => {
+                                        console.log("omasafe: drop on row")
                                         rowDelegate.folderHover = false
                                         if (!root.svc)
                                             return
@@ -1301,6 +1309,7 @@ Panel {
                                         enabled: tileDelegate.browsable
 
                                         onEntered: drag => {
+                                            console.log("omasafe: drag enter tile, urls=" + drag.hasUrls)
                                             if (!drag.hasUrls && !drag.hasText)
                                                 return
                                             drag.accept(Qt.CopyAction)
@@ -1310,6 +1319,7 @@ Panel {
                                         onExited: tileDelegate.folderHover = false
 
                                         onDropped: drop => {
+                                            console.log("omasafe: drop on tile")
                                             tileDelegate.folderHover = false
                                             if (!root.svc)
                                                 return
