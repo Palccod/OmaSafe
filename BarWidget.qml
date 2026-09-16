@@ -29,7 +29,8 @@ Panel {
     readonly property color foreground: bar ? bar.barForeground : Color.foreground
     readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
 
-    // Nerd Font glyphs (md block), verified in the live shell.
+    // Nerd Font glyphs (md block), codepoints from the official
+    // glyphnames.json and confirmed against the installed font's cmap.
     readonly property string glyphShield: "\u{F0499}"        // nf-md-shield
     readonly property string glyphLock: "\u{F0347}"          // nf-md-lock
     readonly property string glyphLockOpen: "\u{F0FCB}"      // nf-md-lock-open-variant
@@ -40,9 +41,9 @@ Panel {
     readonly property string glyphClose: "\u{F0156}"         // nf-md-close
     readonly property string glyphCheck: "\u{F00EC}"         // nf-md-check
     readonly property string glyphFolderOpen: "\u{F0770}"    // nf-md-folder-open
-    readonly property string glyphChevronLeft: "\u{F0142}"   // nf-md-chevron-left
-    readonly property string glyphGrid: "\u{F0238}"          // nf-md-view-grid
-    readonly property string glyphList: "\u{F0239}"          // nf-md-view-list
+    readonly property string glyphChevronLeft: "\u{F0141}"   // nf-md-chevron-left
+    readonly property string glyphGrid: "\u{F0570}"          // nf-md-view-grid
+    readonly property string glyphList: "\u{F0572}"          // nf-md-view-list
 
     // Which card to show is derived state — the service is the only source
     // of truth, so a lock from IPC or the timer lands the card back on the
