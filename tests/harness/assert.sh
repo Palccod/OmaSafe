@@ -9,12 +9,40 @@ check() {  # check <label> <condition-exit>
   if [ "$2" -eq 0 ]; then echo "PASS: $1"; else echo "FAIL: $1"; fails=$((fails+1)); fi
 }
 
-# 1. index.enc decrypts under the password-wrapped key and is version 2
-K=$(OS_PW=testpassword1 openssl enc -d -aes-256-cbc -pbkdf2 -iter 250000 -in $V/wrap.enc -pass env:OS_PW | tr -d '\n')
-OS_KEY=$K openssl enc -d -aes-256-cbc -pbkdf2 -iter 250000 -in $V/index.enc -pass env:OS_KEY -out /tmp/xtest-index.json 2>/dev/null
+# 1. index.enc authenticates, decrypts under the password-wrapped key and
+#    is version 2. The vault fixture is built in the pre-0.6.0
+#    unauthenticated format; after the run every file must have been
+#    migrated to the tagged format, so everything here goes through the
+#    helper.
+OS_SECRET=testpassword1 python3 ./omasafe-crypt.py decrypt "$V/wrap.enc" /tmp/xtest-wrapkey
+check "wrap.enc authenticates and decrypts" $?
+K=$(cat /tmp/xtest-wrapkey)
+OS_SECRET=$K python3 ./omasafe-crypt.py decrypt "$V/index.enc" /tmp/xtest-index.json
 check "index decrypts under password-wrapped key" $?
 grep -q '"version":2' /tmp/xtest-index.json
 check "index on disk is version 2" $?
+
+# 1b. every file left in the vault carries the authentication tag
+nonv3=0
+for f in "$V"/*; do
+  [ "$(python3 ./omasafe-crypt.py check "$f")" = "v3" ] || { echo "  not v3: $f"; nonv3=1; }
+done
+check "every vault file was migrated to the authenticated format" "$nonv3"
+
+# 1c. tampering is refused: flip a byte in a copy of the index — the helper
+#     must fail with its auth exit code and write no plaintext
+cp "$V/index.enc" /tmp/xtest-tampered
+python3 - <<'EOF'
+with open('/tmp/xtest-tampered', 'r+b') as f:
+    f.seek(20)
+    b = f.read(1)
+    f.seek(20)
+    f.write(bytes([b[0] ^ 0x01]))
+EOF
+rm -f /tmp/xtest-tampered-out
+OS_SECRET=$K python3 ./omasafe-crypt.py decrypt /tmp/xtest-tampered /tmp/xtest-tampered-out 2>/dev/null
+[ $? -eq 3 ]; check "tampered index refused with auth failure" $?
+[ ! -e /tmp/xtest-tampered-out ]; check "tampered index produced no plaintext" $?
 
 # 2. expected paths present; the /legacy tree was deleted in the final step
 for p in '/root.txt' '/tree/a.txt' '/tree/sub/b.txt' '/tree/sub/extra.txt' '/tree/empty'; do
@@ -90,9 +118,11 @@ print("PASS: no orphan blobs in the vault")
 EOF
 check "no orphan blobs" $?
 
-# 10. the index refuses to decrypt under an empty key
-OS_KEY="" openssl enc -d -aes-256-cbc -pbkdf2 -iter 250000 -in $V/index.enc -pass env:OS_KEY -out /dev/null 2>/dev/null
-[ $? -ne 0 ]; check "index not readable under an empty key" $?
+# 10. the index refuses to open under an empty key: the tag check fails
+#     before openssl ever runs
+OS_SECRET="" python3 ./omasafe-crypt.py decrypt "$V/index.enc" /tmp/xtest-empty-out 2>/dev/null
+[ $? -eq 3 ]; check "index not readable under an empty key" $?
+[ ! -e /tmp/xtest-empty-out ]; check "empty-key attempt produced no plaintext" $?
 
 echo "----"
 echo "$fails failures"

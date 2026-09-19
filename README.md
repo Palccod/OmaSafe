@@ -8,10 +8,14 @@
 
 An encrypted drop-safe for Omarchy's bar. Drag files, media, or whole folders
 onto the safe and they are locked away: each file is encrypted with
-AES-256-CBC (PBKDF2, 250k iterations) and the original is removed. Opening
+AES-256-CBC (PBKDF2, 250k iterations) and sealed with an HMAC-SHA256
+authentication tag that is verified before anything is ever decrypted — a
+tampered file is refused, not opened — and the original is removed. Opening
 the safe shows a small file explorer — browse folders, switch between list
 and grid, and drop files into the folder you're looking at — and lets you
-unlock items back to `~/Downloads/OmaSafe` or destroy them.
+unlock items back to `~/Downloads/OmaSafe` or destroy them. Safes from
+before 0.6.0 are upgraded to the authenticated format automatically, a few
+files at a time, on the first unlock after the update.
 
 ## Install
 
@@ -64,15 +68,19 @@ omarchy plugin add https://github.com/palccod/OmaSafe --enable
 ## Privacy model
 
 The vault lives in `~/.local/share/.omasafe/vault/` (mode 700). Everything
-in it is ciphertext with random hex filenames — no extensions, no names, no
-plaintext index. A file manager can open the folder and learn nothing:
-item names, sizes, and dates are inside `index.enc`, which is itself
-encrypted under the vault key. The vault key is wrapped twice on disk —
-`wrap.enc` under your password and `recovery.enc` under the back-up key —
-and exists in memory only while the safe is unlocked; neither the password
-nor the back-up key is stored anywhere. Plaintext exists on disk only for
-the milliseconds an operation takes, in a tmpfs scratch directory under
-`XDG_RUNTIME_DIR`, and is deleted immediately — the one exception is the
+in it is authenticated ciphertext with random hex filenames — no extensions,
+no names, no plaintext index. A file manager can open the folder and learn
+nothing: item names, sizes, and dates are inside `index.enc`, which is
+itself encrypted under the vault key, and every encrypted file carries an
+HMAC tag so that silent tampering is detected and refused before any of it
+is used. The vault key is wrapped twice on disk — `wrap.enc` under your
+password and `recovery.enc` under the back-up key — and exists in memory
+only while the safe is unlocked; neither the password nor the back-up key
+is stored anywhere. Plaintext exists on disk only for the milliseconds an
+operation takes, in a private tmpfs scratch directory under `XDG_RUNTIME_DIR`
+(a per-UID fallback under `/tmp` where the desktop provides no runtime
+directory — created and re-verified, owner and mode included, immediately
+before every use), and is deleted immediately — the one exception is the
 drag-out staging area, which holds a decrypted copy from the moment you
 press an item until you drop it (and never longer than ten minutes or the
 next lock).
@@ -80,7 +88,13 @@ next lock).
 Safes created before back-up keys were separate from the vault key are
 upgraded automatically on their first unlock: a fresh back-up key is issued
 and shown once, and the old key (which was the raw vault key) is no longer
-accepted.
+accepted. Safes created before 0.6.0 are likewise upgraded to the
+authenticated format on their next unlocks — the password wrap is re-sealed
+at the first password unlock, the back-up wrap at the first back-up-key
+unlock (a password unlock re-issues the back-up key instead, since the old
+wrap can only be re-sealed by whoever holds that key), and every file blob
+is re-tagged in place in the background until the whole vault is
+authenticated.
 
 ### The keyring copy
 

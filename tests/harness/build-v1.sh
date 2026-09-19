@@ -25,7 +25,10 @@ printf 'locked out\n' > home/dropbox/partial/x.txt
 chmod 000 home/dropbox/partial/x.txt
 
 # The v1 vault: vault key wrapped under the password, the legacy folder as one
-# tar blob, the root file as a second blob, and a version-1 index.
+# tar blob, the root file as a second blob, and a version-1 index. Everything
+# is written with bare openssl — pre-0.4.0 layout AND pre-0.6.0 unauthenticated
+# crypto — so the unlock-time migrations (tar explosion, per-file re-tagging,
+# wrap/index re-wraps) are all genuinely exercised.
 K=$(openssl rand -hex 32)
 TARID=$(openssl rand -hex 16)
 FID=$(openssl rand -hex 16)

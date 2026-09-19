@@ -17,9 +17,16 @@ import "SafeModel.js" as SafeModel
 //                                              the back-up key
 //   ~/.local/share/.omasafe/vault/index.enc  the manifest (vault paths, sizes),
 //                                            encrypted under the vault key
-//   ~/.local/share/.omasafe/vault/<id>       one blob per FILE, openssl
-//                                            AES-256-CBC + PBKDF2, filename
-//                                            is a random 32-hex id
+//   ~/.local/share/.omasafe/vault/<id>       one blob per FILE, filename is
+//                                            a random 32-hex id
+//
+// Every file is authenticated (omasafe-crypt.py): AES-256-CBC + PBKDF2
+// wrapped in encrypt-then-MAC — an HMAC-SHA256 tag over header and
+// ciphertext, verified in full before any decryption runs, so tampered
+// ciphertext is refused before plaintext can exist. Files from before
+// 0.6.0 have no tag; they still open, and each one is migrated to the
+// tagged format as soon as the session holds the secret it was wrapped
+// with (see _migrateWraps and _reencryptBlob).
 //
 // The index is a tiny file system: every entry carries a vault-absolute path
 // ("/photos", "/photos/cat.jpg"); folder entries are structural markers and
@@ -33,9 +40,9 @@ import "SafeModel.js" as SafeModel
 // file manager shows a directory of opaque blobs. The vault key exists in
 // memory only while the safe is unlocked; the password and the back-up key
 // are never stored anywhere at all. Unlocking means: decrypt wrap.enc with
-// the typed password (openssl refuses to decrypt garbage, so the exit code
-// is the password check), or decrypt recovery.enc with the 64-hex back-up
-// key. Changing the password re-wraps both files and issues a fresh
+// the typed password (the crypto helper refuses garbage and tampered input
+// alike, so the exit code is the password check), or decrypt recovery.enc
+// with the 64-hex back-up key. Changing the password re-wraps both files and issues a fresh
 // back-up key, so the old one stops working the moment the new one is
 // issued. Safes created before recovery.enc existed are upgraded on their
 // first unlock: a separate back-up key is issued then, and the old key
@@ -96,6 +103,10 @@ Item {
     // Seconds to stay unlocked after the popout closes; 0 keeps the session
     // until the shell restarts or the user locks manually.
     property int autoLockSeconds: 15
+    // Set once the authenticated-format migration pass has swept the vault
+    // and found nothing legacy — every write has been tagged since 0.6.0, so
+    // a clean pass means the pass never needs to run again.
+    property bool cryptoMigrated: false
 
     signal toast(string message)
 
@@ -104,11 +115,20 @@ Item {
     readonly property string home: Quickshell.env("HOME") || ""
     readonly property string dataHome: Quickshell.env("XDG_DATA_HOME") || (home + "/.local/share")
     readonly property string stateHome: Quickshell.env("XDG_STATE_HOME") || (home + "/.local/state")
-    readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || "/tmp"
+    readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || ""
+    // Filled at boot (`id -u`); only the /tmp fallback below needs it.
+    property string _uid: ""
     readonly property string vaultDir: dataHome + "/.omasafe/vault"
     // Plaintext exists here only for the milliseconds an operation takes;
     // the directory is tmpfs on a normal Omarchy install and wiped on logout.
-    readonly property string scratchDir: runtimeDir + "/omasafe"
+    // The fallback when the desktop gives no XDG_RUNTIME_DIR is NOT the
+    // shared, predictable /tmp/omasafe — it is a per-UID directory under
+    // /tmp, and every use of the scratch tree is gated by
+    // omasafe-scratch-verify.sh, which refuses symlinks, foreign owners and
+    // loose modes immediately before anything sensitive is written or removed.
+    readonly property string scratchBase: runtimeDir !== "" ? runtimeDir
+                                                            : "/tmp/omasafe-" + root._uid
+    readonly property string scratchDir: scratchBase + "/omasafe"
     // Plaintext staged here only while an item is being dragged out of the
     // card; wiped when the safe locks, or after ten minutes, whichever
     // comes first.
@@ -124,6 +144,9 @@ Item {
     // One recursive folder drop may queue at most this many file encryptions;
     // larger trees are refused whole rather than half-stashed.
     readonly property int maxStashFiles: 500
+    // Exit code omasafe-crypt.py uses for "decrypted fine, but the file was
+    // a pre-0.6.0 blob without an authentication tag — migrate it".
+    readonly property int exitLegacy: 10
 
     // --- the job queue --------------------------------------------------------
     //
@@ -200,34 +223,30 @@ Item {
         }
     }
 
-    // openssl arguments for one encrypt/decrypt of a file. The key always
-    // arrives through an environment variable named by `passVar`. An empty
-    // `dst` means stdout: the plaintext comes back through the pipe and
-    // never touches the disk.
-    function _cipherArgv(src, dst, passVar, decrypt) {
-        const argv = ["openssl", "enc"]
-        if (decrypt)
-            argv.push("-d")
-        argv.push("-aes-256-cbc", "-pbkdf2", "-iter", "250000")
-        if (!decrypt)
-            argv.push("-salt")
-        argv.push("-in", src)
-        if (dst !== "")
-            argv.push("-out", dst)
-        argv.push("-pass", "env:" + passVar)
-        return argv
+    // One encrypt/decrypt of a file, run by the shipped helper:
+    // AES-256-CBC (PBKDF2, 250k iterations) wrapped in encrypt-then-MAC.
+    // The secret always arrives through the environment variable OS_SECRET —
+    // never argv — and an empty `dst` means stdout: the plaintext comes back
+    // through the pipe and never touches the disk. On decrypt the helper
+    // verifies the HMAC tag over the whole ciphertext before openssl runs,
+    // so tampered ciphertext can never produce plaintext; exit code
+    // `exitLegacy` means the file decrypted fine but was a pre-0.6.0 blob
+    // without a tag, and the caller migrates it.
+    function _cipherArgv(src, dst, decrypt) {
+        return ["python3", root._helperPath("omasafe-crypt.py"),
+                decrypt ? "decrypt" : "encrypt", src, dst === "" ? "-" : dst]
     }
 
     // Critical metadata (wrap.enc, recovery.enc, index.enc) is never written
-    // in place: openssl encrypts into a hidden temp file in the same
-    // directory and a rename flips it over the live name. A crash can cost
-    // the new version, but a truncated or half-encrypted file can never be
-    // what survives under the live name. The temp must share the vault
-    // directory — a rename across filesystems (tmpfs scratch → disk) is a
-    // copy, not an atomic flip.
-    function _cipherAtomic(src, dstPath, passVar, env, done) {
+    // in place: the helper encrypts into a hidden temp file in the same
+    // directory (O_NOFOLLOW, 0600) and a rename flips it over the live name.
+    // A crash can cost the new version, but a truncated or half-encrypted
+    // file can never be what survives under the live name. The temp must
+    // share the vault directory — a rename across filesystems (tmpfs
+    // scratch → disk) is a copy, not an atomic flip.
+    function _cipherAtomic(src, dstPath, env, done) {
         const tmp = root.vaultDir + "/.tmp-" + SafeModel.basename(dstPath)
-        _enqueue(_cipherArgv(src, tmp, passVar, false), env, (code, out) => {
+        _enqueue(_cipherArgv(src, tmp, false), env, (code, out) => {
             if (code !== 0) {
                 _enqueue(["rm", "-f", "--", tmp], {}, null)
                 if (done) done(false)
@@ -247,6 +266,47 @@ Item {
         })
     }
 
+    // Plugin-shipped script/helper paths (keyring helper, crypt helper,
+    // scratch gate). Invoked through their interpreters, so no exec bit
+    // needs to survive packaging.
+    function _helperPath(name) {
+        const u = Qt.resolvedUrl(name).toString()
+        return u.indexOf("file://") === 0 ? u.substring(7) : u
+    }
+
+    // --- the scratch gate -------------------------------------------------------
+    //
+    // The scratch tree holds plaintext for milliseconds at a time, so it is
+    // held to the letter of the review that flagged the old /tmp/omasafe:
+    // per-UID when the desktop gives no runtime dir, and verified
+    // immediately before every sensitive write or removal. The gate is one
+    // queue job (omasafe-scratch-verify.sh): a symlink is never followed, a
+    // foreign-owned or loose-mode directory fails the check, and only an
+    // all-ok run lets the guarded jobs enqueue.
+
+    function _scratchVerify(done) {
+        const dirs = root.runtimeDir === ""
+            ? [root.scratchBase, root.scratchDir, root.stageDir]
+            : [root.scratchDir, root.stageDir]
+        _enqueue(["sh", root._helperPath("omasafe-scratch-verify.sh")].concat(dirs),
+                 {}, (code, out) => {
+            done(code === 0 && out.trim() === "ok")
+        })
+    }
+
+    // Runs `build` (which enqueues the real jobs) only after the scratch
+    // tree verified; `fail` runs otherwise. Every sensitive write or removal
+    // below goes through this.
+    function _withScratch(build, fail) {
+        _scratchVerify(ok => {
+            if (ok) {
+                build()
+            } else if (fail) {
+                fail()
+            }
+        })
+    }
+
     function _exists(path, done) {
         _enqueue(["sh", "-c", 'if [ -f "$1" ]; then echo yes; else echo no; fi',
                   "omasafe-has", path], {}, (code, out) => {
@@ -255,15 +315,28 @@ Item {
     }
 
     // Writes small plaintext to scratch through the environment (it never
-    // touches argv, so it never shows in `ps`).
+    // touches argv, so it never shows in `ps`). The gate runs immediately
+    // before the write — a directory that stopped being private since the
+    // last check refuses it. `done(code, out)` gets a nonzero code when the
+    // gate refused.
     function _writeScratch(fileName, content, done) {
-        _enqueue(["sh", "-c", 'umask 077; printf %s "$OS_DATA" > "$1"',
-                  "omasafe-scratch", root.scratchDir + "/" + fileName],
-                 { OS_DATA: content }, done)
+        _withScratch(() => {
+            _enqueue(["sh", "-c", 'umask 077; printf %s "$OS_DATA" > "$1"',
+                      "omasafe-scratch", root.scratchDir + "/" + fileName],
+                     { OS_DATA: content }, done)
+        }, () => {
+            if (done)
+                done(1, "")
+        })
     }
 
+    // A removal in scratch, gated like every other sensitive touch. When
+    // the gate fails, nothing under the scratch tree is touched — `rm -rf`
+    // through a hostile path component would delete whatever it points at.
     function _rmScratch(fileName) {
-        _enqueue(["rm", "-f", "--", root.scratchDir + "/" + fileName], {}, null)
+        _withScratch(() => {
+            _enqueue(["rm", "-f", "--", root.scratchDir + "/" + fileName], {}, null)
+        }, null)
     }
 
     // A deletion that is only ever allowed inside the user's home — the
@@ -276,22 +349,54 @@ Item {
     // --- boot -----------------------------------------------------------------
 
     function _mkdirs(done) {
-        _enqueue(["sh", "-c", 'umask 077; mkdir -p "$1" "$2" "$3"',
-                  "omasafe-mkdir", root.vaultDir, root.scratchDir,
-                  root.stateHome + "/omarchy/plugins"], {}, done)
+        _enqueue(["sh", "-c", 'umask 077; mkdir -p -- "$1" "$2"',
+                  "omasafe-mkdir", root.vaultDir,
+                  root.stateHome + "/omarchy/plugins"], {}, (mc, mo) => {
+            if (mc !== 0) {
+                done(false)
+                return
+            }
+            // The vault gets the same private-directory treatment as the
+            // scratch tree: it holds the wraps, the index and every blob.
+            _enqueue(["sh", root._helperPath("omasafe-scratch-verify.sh"),
+                      root.vaultDir], {}, (vc, vo) => {
+                done(vc === 0 && vo.trim() === "ok")
+            })
+        })
     }
 
     Component.onCompleted: {
+        // The /tmp scratch fallback needs the uid for its per-UID path, so
+        // boot is enqueued from this job's callback — after the uid is
+        // known. With XDG_RUNTIME_DIR set (the normal case) the value is
+        // simply unused.
+        _enqueue(["sh", "-c", "id -u"], {}, (c, out) => {
+            root._uid = out.trim()
+            root._boot()
+        })
+    }
+
+    function _boot() {
         Quickshell.execDetached(["mkdir", "-p", root.stateHome + "/omarchy/plugins"])
-        _mkdirs((code, out) => {
+        _mkdirs(ok => {
+            if (!ok) {
+                root.lastError = "The safe's folders are not secure"
+                return
+            }
             // A killed shell can leave staged plaintext behind with no sweeper
             // running. Nothing legitimate can be in the stage dir at boot —
             // the safe starts locked — so it is wiped before anything else.
-            _enqueue(["rm", "-rf", "--", root.stageDir], {}, null)
-            _enqueue(["sh", "-c", 'if [ -f "$1" ] && [ -f "$2" ]; then echo yes; else echo no; fi',
-                      "omasafe-check", root.wrapPath, root.indexPath], {}, (c, out2) => {
-                root.initialized = out2.trim() === "yes"
-                root.phase = root.initialized ? "locked" : "empty"
+            // The gate decides whether the wipe may happen at all: when the
+            // tree no longer verifies, nothing under it is touched.
+            _withScratch(() => {
+                _enqueue(["rm", "-rf", "--", root.stageDir], {}, null)
+                _enqueue(["sh", "-c", 'if [ -f "$1" ] && [ -f "$2" ]; then echo yes; else echo no; fi',
+                          "omasafe-check", root.wrapPath, root.indexPath], {}, (c, out2) => {
+                    root.initialized = out2.trim() === "yes"
+                    root.phase = root.initialized ? "locked" : "empty"
+                })
+            }, () => {
+                root.lastError = "The safe's scratch folders are not secure"
             })
         })
     }
@@ -309,6 +414,8 @@ Item {
                 if (typeof prefs.deleteOriginals === "boolean")
                     root.deleteOriginals = prefs.deleteOriginals
                 root.autoLockSeconds = SafeModel.clampInt(prefs.autoLockSeconds, 15, 0, 3600)
+                if (typeof prefs.cryptoMigrated === "boolean")
+                    root.cryptoMigrated = prefs.cryptoMigrated
             } catch (e) {
                 // First run or a damaged file: defaults are already in place.
             }
@@ -319,7 +426,8 @@ Item {
     function _savePrefs() {
         prefsFile.setText(JSON.stringify({
             deleteOriginals: root.deleteOriginals,
-            autoLockSeconds: root.autoLockSeconds
+            autoLockSeconds: root.autoLockSeconds,
+            cryptoMigrated: root.cryptoMigrated
         }))
     }
 
@@ -342,9 +450,14 @@ Item {
                 // The vault key spends a few milliseconds in scratch while
                 // it is wrapped twice — once under the password, once under
                 // a freshly minted back-up key — then is gone.
-                _writeScratch("key", key, () => {
-                    _cipherAtomic(root.scratchDir + "/key", root.wrapPath, "OS_PW",
-                                  { OS_PW: password }, ok2 => {
+                _writeScratch("key", key, wcode => {
+                    if (wcode !== 0) {
+                        root.busyLabel = ""
+                        root.lastError = "Could not create the safe"
+                        return
+                    }
+                    _cipherAtomic(root.scratchDir + "/key", root.wrapPath,
+                                  { OS_SECRET: password }, ok2 => {
                         if (!ok2) {
                             _rmScratch("key")
                             root.busyLabel = ""
@@ -358,8 +471,8 @@ Item {
                                 root.lastError = "Key generation failed"
                                 return
                             }
-                            _cipherAtomic(root.scratchDir + "/key", root.recoveryPath, "OS_RK",
-                                          { OS_RK: rk }, ok3 => {
+                            _cipherAtomic(root.scratchDir + "/key", root.recoveryPath,
+                                          { OS_SECRET: rk }, ok3 => {
                                 _rmScratch("key")
                                 if (!ok3) {
                                     root.busyLabel = ""
@@ -536,11 +649,9 @@ Item {
         const name = SafeModel.baseNameOf(item.path)
         root.busyLabel = "Preparing " + name + "…"
         const gen = root._generation
-        _enqueue(["sh", "-c", 'umask 077; mkdir -p -- "$1"', "omasafe-stage", root.stageDir], {}, (mc, mo) => {
-            if (mc !== 0) {
-                _stageDone(item.path, "", false, name, gen)
-                return
-            }
+        // The gate is the stage directory's creation: verified, 0700,
+        // owner-matched, no symlink — or nothing is staged.
+        _withScratch(() => {
             // A stage name that is not already taken, so two items that share
             // a name stage side by side.
             _enqueue(["sh", "-c",
@@ -555,9 +666,11 @@ Item {
                 const target = root.stageDir + "/" + finalName
                 if (!item.isDir) {
                     const blobPath = root.vaultDir + "/" + item.id
-                    _enqueue(_cipherArgv(blobPath, target, "OS_KEY", true),
-                             { OS_KEY: root.sessionKey }, (dc, do2) => {
-                        _stageDone(item.path, target, dc === 0, name, gen)
+                    _enqueue(_cipherArgv(blobPath, target, true),
+                             { OS_SECRET: root.sessionKey }, (dc, do2) => {
+                        if (dc === root.exitLegacy)
+                            root._reencryptBlob(target, item.id, gen)
+                        _stageDone(item.path, target, dc === 0 || dc === root.exitLegacy, name, gen)
                     })
                     return
                 }
@@ -609,6 +722,8 @@ Item {
                     }, gen)
                 })
             })
+        }, () => {
+            _stageDone(item.path, "", false, name, gen)
         })
         return true
     }
@@ -630,29 +745,41 @@ Item {
             const j = jobs[idx]
             idx++
             root.busyLabel = label + " " + idx + "/" + jobs.length
-            _enqueue(_cipherArgv(root.vaultDir + "/" + j.id, root.scratchDir + "/export.bin", "OS_KEY", true),
-                     { OS_KEY: root.sessionKey }, (dc, dOut) => {
-                if (root._stale(gen)) {
-                    _rmScratch("export.bin")
-                    done(false)
-                    return
-                }
-                if (dc !== 0) {
-                    _rmScratch("export.bin")
-                    root.busyLabel = ""
-                    done(false)
-                    return
-                }
-                _enqueue(["mv", "--", root.scratchDir + "/export.bin", j.target], {}, (vc, vo) => {
-                    if (vc !== 0)
+            // The gate runs per file, immediately before each write into
+            // scratch.
+            _withScratch(() => {
+                _enqueue(_cipherArgv(root.vaultDir + "/" + j.id, root.scratchDir + "/export.bin", true),
+                         { OS_SECRET: root.sessionKey }, (dc, dOut) => {
+                    const legacy = dc === root.exitLegacy
+                    if (root._stale(gen)) {
                         _rmScratch("export.bin")
-                    if (vc !== 0) {
+                        done(false)
+                        return
+                    }
+                    if (dc !== 0 && !legacy) {
+                        _rmScratch("export.bin")
                         root.busyLabel = ""
                         done(false)
                         return
                     }
-                    step()
+                    // A legacy blob is re-tagged in place from the plaintext
+                    // that is sitting in scratch right now.
+                    if (legacy)
+                        root._reencryptBlob(root.scratchDir + "/export.bin", j.id, gen)
+                    _enqueue(["mv", "--", root.scratchDir + "/export.bin", j.target], {}, (vc, vo) => {
+                        if (vc !== 0)
+                            _rmScratch("export.bin")
+                        if (vc !== 0) {
+                            root.busyLabel = ""
+                            done(false)
+                            return
+                        }
+                        step()
+                    })
                 })
+            }, () => {
+                root.busyLabel = ""
+                done(false)
             })
         }
         step()
@@ -661,46 +788,61 @@ Item {
     // A pre-0.4.0 folder is one tar blob; stage it the old way until the
     // upgrade has exploded it.
     function _stageLegacyTar(item, target, name, gen) {
-        _enqueue(_cipherArgv(root.vaultDir + "/" + item.id, root.scratchDir + "/item.tar", "OS_KEY", true),
-                 { OS_KEY: root.sessionKey }, (dc, dOut) => {
-            if (dc !== 0) {
-                _rmScratch("item.tar")
-                _stageDone(item.path, "", false, name, gen)
-                return
-            }
-            _enqueue(["rm", "-rf", "--", root.scratchDir + "/extract"], {}, () => {
-                _enqueue(["mkdir", "-p", "--", root.scratchDir + "/extract"], {}, () => {
-                    _enqueue(["tar", "-C", root.scratchDir + "/extract", "-xf",
-                              root.scratchDir + "/item.tar"], {}, (xc, xo) => {
-                        _rmScratch("item.tar")
-                        if (xc !== 0) {
-                            _stageDone(item.path, "", false, name, gen)
-                            return
-                        }
-                        _enqueue(["mv", "--", root.scratchDir + "/extract/" + SafeModel.safeName(name),
-                                  target], {}, (vc, vo) => {
-                            _enqueue(["rm", "-rf", "--", root.scratchDir + "/extract"], {}, () => {})
-                            _stageDone(item.path, target, vc === 0, name, gen)
+        _withScratch(() => {
+            _enqueue(_cipherArgv(root.vaultDir + "/" + item.id, root.scratchDir + "/item.tar", true),
+                     { OS_SECRET: root.sessionKey }, (dc, dOut) => {
+                if (dc !== 0 && dc !== root.exitLegacy) {
+                    _rmScratch("item.tar")
+                    _stageDone(item.path, "", false, name, gen)
+                    return
+                }
+                if (dc === root.exitLegacy)
+                    root._reencryptBlob(root.scratchDir + "/item.tar", item.id, gen)
+                _enqueue(["rm", "-rf", "--", root.scratchDir + "/extract"], {}, () => {
+                    _enqueue(["mkdir", "-p", "--", root.scratchDir + "/extract"], {}, () => {
+                        _enqueue(["tar", "--no-overwrite-dir", "--no-same-owner",
+                                  "--no-same-permissions", "--warning=no-unknown-keyword",
+                                  "-C", root.scratchDir + "/extract", "-xf",
+                                  root.scratchDir + "/item.tar"], {}, (xc, xo) => {
+                            _rmScratch("item.tar")
+                            if (xc !== 0) {
+                                _stageDone(item.path, "", false, name, gen)
+                                return
+                            }
+                            _enqueue(["mv", "--", root.scratchDir + "/extract/" + SafeModel.safeName(name),
+                                      target], {}, (vc, vo) => {
+                                _enqueue(["rm", "-rf", "--", root.scratchDir + "/extract"], {}, () => {})
+                                _stageDone(item.path, target, vc === 0, name, gen)
+                            })
                         })
                     })
                 })
             })
+        }, () => {
+            _stageDone(item.path, "", false, name, gen)
         })
     }
 
     // Removes every staged plaintext copy. Called when the safe locks; the
     // ten-minute sweeper below is the backstop for a session that never locks.
+    // The removals run only once the scratch tree verifies — when it does not
+    // (a planted path, a foreign owner), nothing under it is touched, since
+    // `rm -rf` through a hostile path component would hit whatever it points
+    // at; the staged map is cleared regardless.
     function clearStaged() {
         const map = Object.assign({}, root.staged)
         let dirty = false
         for (const id in map) {
-            _enqueue(["rm", "-rf", "--", map[id].path], {}, null)
             delete map[id]
             dirty = true
         }
         if (dirty)
             root.staged = map
-        _enqueue(["rm", "-rf", "--", root.stageDir], {}, null)
+        _withScratch(() => {
+            for (const id in map)
+                _enqueue(["rm", "-rf", "--", map[id].path], {}, null)
+            _enqueue(["rm", "-rf", "--", root.stageDir], {}, null)
+        }, null)
     }
 
     Timer {
@@ -710,16 +852,22 @@ Item {
         onTriggered: {
             const now = Date.now()
             const map = Object.assign({}, root.staged)
+            const expired = []
             let dirty = false
             for (const id in map) {
                 if (now - map[id].at > 600000) {
-                    _enqueue(["rm", "-rf", "--", map[id].path], {}, null)
+                    expired.push(map[id].path)
                     delete map[id]
                     dirty = true
                 }
             }
-            if (dirty)
-                root.staged = map
+            if (!dirty)
+                return
+            root.staged = map
+            _withScratch(() => {
+                for (const p of expired)
+                    _enqueue(["rm", "-rf", "--", p], {}, null)
+            }, null)
         }
     }
 
@@ -753,13 +901,20 @@ Item {
         root.lastError = ""
         root.busyLabel = "Unlocking…"
         const gen = root._generation
-        _enqueue(_cipherArgv(root.wrapPath, "", "OS_PW", true), { OS_PW: attempt }, (code, out) => {
+        _enqueue(_cipherArgv(root.wrapPath, "", true), { OS_SECRET: attempt }, (code, out) => {
             if (root._stale(gen))
                 return
-            // Decrypt to stdout: no -out argument, so the plaintext key comes
-            // back through the pipe and never touches the disk.
+            // Decrypt to stdout: no destination argument, so the plaintext
+            // key comes back through the pipe and never touches the disk.
+            // Exit 3 is the helper refusing tampered ciphertext — reported
+            // as what it is, not as a wrong password.
             const key = out.trim()
-            if (code !== 0 || !SafeModel.isHex64(key)) {
+            if (code === 3) {
+                root.busyLabel = ""
+                root.lastError = "The safe's files were tampered with — refused to open"
+                return
+            }
+            if ((code !== 0 && code !== root.exitLegacy) || !SafeModel.isHex64(key)) {
                 const backup = SafeModel.normalizeKey(attempt)
                 if (SafeModel.isHex64(backup)) {
                     _unlockWithKey(backup, gen)
@@ -772,6 +927,10 @@ Item {
             root.unlockedViaRecovery = false
             root.sessionKey = key
             _loadIndex()
+            // A pre-0.6.0 wrap opened fine but has no tag — re-wrap it under
+            // the same password now that the session holds the vault key.
+            if (code === root.exitLegacy)
+                root._migrateWraps(attempt, gen)
         })
         return true
     }
@@ -784,11 +943,16 @@ Item {
             if (root._stale(gen))
                 return
             if (has) {
-                _enqueue(_cipherArgv(root.recoveryPath, "", "OS_RK", true), { OS_RK: key }, (code, out) => {
+                _enqueue(_cipherArgv(root.recoveryPath, "", true), { OS_SECRET: key }, (code, out) => {
                     if (root._stale(gen))
                         return
                     const vk = out.trim()
-                    if (code !== 0 || !SafeModel.isHex64(vk)) {
+                    if (code === 3) {
+                        root.busyLabel = ""
+                        root.lastError = "The safe's files were tampered with — refused to open"
+                        return
+                    }
+                    if ((code !== 0 && code !== root.exitLegacy) || !SafeModel.isHex64(vk)) {
                         root.busyLabel = ""
                         root.lastError = "Back-up key does not fit this safe"
                         return
@@ -796,13 +960,16 @@ Item {
                     root.unlockedViaRecovery = true
                     root.sessionKey = vk
                     _loadIndex()
+                    // Legacy recovery wrap: re-tag it under the same key.
+                    if (code === root.exitLegacy)
+                        root._migrateRecovery(key, gen)
                 })
                 return
             }
-            _enqueue(_cipherArgv(root.indexPath, "", "OS_KEY", true), { OS_KEY: key }, (code, out) => {
+            _enqueue(_cipherArgv(root.indexPath, "", true), { OS_SECRET: key }, (code, out) => {
                 if (root._stale(gen))
                     return
-                if (code !== 0) {
+                if (code !== 0 && code !== root.exitLegacy) {
                     root.busyLabel = ""
                     root.lastError = "Back-up key does not fit this safe"
                     return
@@ -816,13 +983,14 @@ Item {
 
     function _loadIndex() {
         const gen = root._generation
-        _enqueue(_cipherArgv(root.indexPath, "", "OS_KEY", true), { OS_KEY: root.sessionKey }, (code, out) => {
+        _enqueue(_cipherArgv(root.indexPath, "", true), { OS_SECRET: root.sessionKey }, (code, out) => {
             if (root._stale(gen))
                 return
             root.busyLabel = ""
-            if (code !== 0) {
+            if (code !== 0 && code !== root.exitLegacy) {
                 root.sessionKey = ""
-                root.lastError = "The safe could not be opened"
+                root.lastError = code === 3 ? "The safe's index failed its integrity check"
+                                            : "The safe could not be opened"
                 root.phase = root.initialized ? "locked" : "empty"
                 return
             }
@@ -888,9 +1056,15 @@ Item {
             root.lastError = ""
             root.phase = "unlocked"
             root.currentFolder = "/"
+            // A pre-0.6.0 index loaded fine but has no tag — it is rewritten
+            // in the authenticated format right away.
+            if (code === root.exitLegacy)
+                root._writeIndex(null)
             if (legacy)
                 root._migrateLegacy(gen)
             root._ensureRecovery()
+            if (!root.cryptoMigrated)
+                root._migrateBlobs(gen)
         })
     }
 
@@ -905,44 +1079,233 @@ Item {
             // A present recovery.enc means the safe is already upgraded; the
             // upgrade may only run when it is missing. Running it anyway would
             // re-mint the back-up key on every unlock, silently killing the
-            // copy the user saved.
+            // copy the user saved. (A *legacy* recovery.enc is migrated by
+            // _migrateWraps instead — same rotation, different trigger.)
             if (root._stale(gen) || has)
                 return
-            root.busyLabel = "Upgrading the safe…"
-            _hexJob(32, rk => {
-                if (!SafeModel.isHex64(rk)) {
+            root._issueBackupKey("rotated")
+        })
+    }
+
+    // Issues a fresh back-up key wrapping the live vault key and shows it
+    // once. Used both by the pre-recovery upgrade above and by the
+    // authenticated-format migration (_migrateWraps).
+    function _issueBackupKey(reason) {
+        const gen = root._generation
+        root.busyLabel = "Upgrading the safe…"
+        _hexJob(32, rk => {
+            if (!SafeModel.isHex64(rk)) {
+                root.busyLabel = ""
+                root._emitToast("Could not issue a back-up key — try locking and unlocking again")
+                return
+            }
+            // Locked mid-upgrade: wrapping the now-empty session key
+            // would replace recovery.enc with garbage the user can never
+            // decrypt. The next unlock retries the upgrade instead.
+            if (root._stale(gen) || !SafeModel.isHex64(root.sessionKey)) {
+                root.busyLabel = ""
+                return
+            }
+            _writeScratch("vkey", root.sessionKey, wcode => {
+                if (wcode !== 0) {
                     root.busyLabel = ""
                     root._emitToast("Could not issue a back-up key — try locking and unlocking again")
                     return
                 }
-                // Locked mid-upgrade: wrapping the now-empty session key
-                // would replace recovery.enc with garbage the user can never
-                // decrypt. The next unlock retries the upgrade instead.
+                // Env for the wrap below is captured here — re-check.
                 if (root._stale(gen) || !SafeModel.isHex64(root.sessionKey)) {
+                    _rmScratch("vkey")
                     root.busyLabel = ""
                     return
                 }
-                _writeScratch("vkey", root.sessionKey, () => {
-                    // Env for the wrap below is captured here — re-check.
-                    if (root._stale(gen) || !SafeModel.isHex64(root.sessionKey)) {
-                        _rmScratch("vkey")
-                        root.busyLabel = ""
+                _cipherAtomic(root.scratchDir + "/vkey", root.recoveryPath,
+                              { OS_SECRET: rk }, ok => {
+                    _rmScratch("vkey")
+                    root.busyLabel = ""
+                    if (!ok) {
+                        root._emitToast("Could not issue a back-up key — try locking and unlocking again")
                         return
                     }
-                    _cipherAtomic(root.scratchDir + "/vkey", root.recoveryPath, "OS_RK",
-                                  { OS_RK: rk }, ok => {
-                        _rmScratch("vkey")
-                        root.busyLabel = ""
-                        if (!ok) {
-                            root._emitToast("Could not issue a back-up key — try locking and unlocking again")
-                            return
-                        }
-                        root.pendingBackupKey = rk
-                        root.pendingKeyReason = "rotated"
-                    })
+                    root.pendingBackupKey = rk
+                    root.pendingKeyReason = reason
                 })
             })
         })
+    }
+
+    // --- the 0.6.0 authenticated-format upgrade --------------------------------
+    //
+    // Safes written before 0.6.0 used bare AES-256-CBC with no
+    // authentication tag. Every file moves to the tagged format as soon as
+    // the session holds the secret it was wrapped with: wrap.enc on a
+    // password unlock, recovery.enc on a back-up-key unlock, the index
+    // right after it loads, and each blob the first time it is decrypted.
+    // Nothing is migrated under a half-open session — every step re-checks
+    // the generation and the live key — and a step that fails just leaves
+    // the file legacy for the next unlock to retry.
+
+    // True when `path` is still a pre-0.6.0 file without a tag.
+    function _needsMigration(path, done) {
+        _enqueue(["python3", root._helperPath("omasafe-crypt.py"), "check", path],
+                 {}, (code, out) => {
+            done(code === 0 && out.trim() === "legacy")
+        })
+    }
+
+    // Re-encrypts a legacy blob in place: same id, same plaintext, now with
+    // a tag. The plaintext is wherever the blob was just decrypted to.
+    function _reencryptBlob(plainPath, id, gen) {
+        if (root._stale(gen) || !SafeModel.isHex64(root.sessionKey))
+            return
+        _cipherAtomic(plainPath, root.vaultDir + "/" + id,
+                      { OS_SECRET: root.sessionKey }, ok => {})
+    }
+
+    // Password unlock: re-wrap wrap.enc under the same password, then check
+    // recovery.enc — a legacy recovery wrap cannot be re-tagged without the
+    // back-up key that made it, so a fresh back-up key is issued (and shown
+    // once) instead.
+    function _migrateWraps(password, gen) {
+        if (root._stale(gen) || !SafeModel.isHex64(root.sessionKey))
+            return
+        root.busyLabel = "Upgrading the safe…"
+        _writeScratch("mkey", root.sessionKey, wcode => {
+            if (root._stale(gen) || !SafeModel.isHex64(root.sessionKey)) {
+                _rmScratch("mkey")
+                root.busyLabel = ""
+                return
+            }
+            if (wcode !== 0) {
+                root.busyLabel = ""
+                root._emitToast("Could not finish the safe's encryption upgrade — it will retry next unlock")
+                return
+            }
+            _cipherAtomic(root.scratchDir + "/mkey", root.wrapPath,
+                          { OS_SECRET: password }, ok => {
+                _rmScratch("mkey")
+                root.busyLabel = ""
+                if (!ok) {
+                    root._emitToast("Could not finish the safe's encryption upgrade — it will retry next unlock")
+                    return
+                }
+                root._needsMigration(root.recoveryPath, legacy => {
+                    if (root._stale(gen))
+                        return
+                    if (legacy)
+                        root._issueBackupKey("rotated")
+                })
+            })
+        })
+    }
+
+    // Back-up-key unlock: re-wrap recovery.enc under the same key. wrap.enc
+    // cannot be re-tagged here — the password made that wrap — so it waits
+    // for the next password unlock or password change.
+    function _migrateRecovery(key, gen) {
+        if (root._stale(gen) || !SafeModel.isHex64(root.sessionKey))
+            return
+        root.busyLabel = "Upgrading the safe…"
+        _writeScratch("mkey", root.sessionKey, wcode => {
+            if (root._stale(gen) || !SafeModel.isHex64(root.sessionKey)) {
+                _rmScratch("mkey")
+                root.busyLabel = ""
+                return
+            }
+            if (wcode !== 0) {
+                root.busyLabel = ""
+                root._emitToast("Could not finish the safe's encryption upgrade — it will retry next unlock")
+                return
+            }
+            _cipherAtomic(root.scratchDir + "/mkey", root.recoveryPath,
+                          { OS_SECRET: key }, ok => {
+                _rmScratch("mkey")
+                root.busyLabel = ""
+                if (!ok)
+                    root._emitToast("Could not finish the safe's encryption upgrade — it will retry next unlock")
+            })
+        })
+    }
+
+    // Walks every indexed blob and re-tags the ones still in the
+    // unauthenticated format — queued behind everything else, one file at a
+    // time, so a big safe upgrades in the background of the session it was
+    // unlocked in. A file that fails (or an unreadable blob) is left for the
+    // next unlock; a file whose entry vanished mid-pass is skipped, and the
+    // rename step refuses to resurrect a blob that a delete just removed.
+    function _migrateBlobs(gen) {
+        const ids = []
+        for (const it of root.items)
+            if (!it.isDir && it.id)
+                ids.push(it.id)
+        if (ids.length === 0) {
+            root.cryptoMigrated = true
+            root._savePrefs()
+            return
+        }
+        let idx = 0
+        let foundLegacy = false
+        const step = () => {
+            if (root._stale(gen))
+                return
+            if (idx >= ids.length) {
+                root.busyLabel = ""
+                if (!foundLegacy) {
+                    root.cryptoMigrated = true
+                    root._savePrefs()
+                }
+                return
+            }
+            const id = ids[idx]
+            idx++
+            root.busyLabel = "Upgrading the safe… " + idx + "/" + ids.length
+            if (!(root.items || []).some(it => it.id === id)) {
+                step()
+                return
+            }
+            root._needsMigration(root.vaultDir + "/" + id, legacy => {
+                if (!legacy) {
+                    step()
+                    return
+                }
+                foundLegacy = true
+                _withScratch(() => {
+                    _enqueue(_cipherArgv(root.vaultDir + "/" + id,
+                                         root.scratchDir + "/migrate.bin", true),
+                             { OS_SECRET: root.sessionKey }, (dc, dOut) => {
+                        if (root._stale(gen)) {
+                            _rmScratch("migrate.bin")
+                            return
+                        }
+                        if (dc !== 0 && dc !== root.exitLegacy) {
+                            _rmScratch("migrate.bin")
+                            step()
+                            return
+                        }
+                        const tmp = root.vaultDir + "/.tmp-" + id
+                        _enqueue(_cipherArgv(root.scratchDir + "/migrate.bin", tmp, false),
+                                 { OS_SECRET: root.sessionKey }, (ec, eo) => {
+                            if (ec !== 0) {
+                                _enqueue(["rm", "-f", "--", tmp], {}, null)
+                                _rmScratch("migrate.bin")
+                                step()
+                                return
+                            }
+                            // Rename only onto a blob that still exists — a
+                            // delete that landed meanwhile must win.
+                            _enqueue(["sh", "-c",
+                                      'if [ -e "$2" ]; then mv -f -- "$1" "$2"; else rm -f -- "$1"; fi',
+                                      "omasafe-migrate", tmp, root.vaultDir + "/" + id], {}, () => {
+                                _rmScratch("migrate.bin")
+                                step()
+                            })
+                        })
+                    })
+                }, () => {
+                    step()
+                })
+            })
+        }
+        step()
     }
 
     // --- the v1 → v2 upgrade ------------------------------------------------------
@@ -1007,29 +1370,37 @@ Item {
     // Decrypts one legacy tar blob, unpacks it in scratch, and turns its
     // contents into a plan of per-file blobs. done(newEntries|null).
     function _migrateOne(entry, done, gen) {
-        _enqueue(_cipherArgv(root.vaultDir + "/" + entry.id, root.scratchDir + "/item.tar", "OS_KEY", true),
-                 { OS_KEY: root.sessionKey }, (dc, dOut) => {
-            if (root._stale(gen)) { done(null); return }
-            if (dc !== 0) { _rmScratch("item.tar"); done(null); return }
-            _enqueue(["rm", "-rf", "--", root.scratchDir + "/extract"], {}, () => {
-                _enqueue(["mkdir", "-p", "--", root.scratchDir + "/extract"], {}, () => {
-                    _enqueue(["tar", "-C", root.scratchDir + "/extract", "-xf",
-                              root.scratchDir + "/item.tar"], {}, (xc, xo) => {
-                        _rmScratch("item.tar")
-                        if (root._stale(gen)) { done(null); return }
-                        if (xc !== 0) { done(null); return }
-                        // Constant script; only the tree root travels as an
-                        // argument. %P gives paths relative to it.
-                        _enqueue(["sh", "-c",
-                                  'find "$1" -mindepth 1 ! -type l \\( -type f -o -type d \\) -printf \'%y\\t%s\\t%P\\n\' | sort',
-                                  "omasafe-find", root.scratchDir + "/extract"], {}, (fc, fo) => {
+        _withScratch(() => {
+            _enqueue(_cipherArgv(root.vaultDir + "/" + entry.id, root.scratchDir + "/item.tar", true),
+                     { OS_SECRET: root.sessionKey }, (dc, dOut) => {
+                if (root._stale(gen)) { done(null); return }
+                if (dc !== 0 && dc !== root.exitLegacy) { _rmScratch("item.tar"); done(null); return }
+                // The tar blob is about to be deleted wholesale by the
+                // migration, so a legacy one needs no re-tag here.
+                _enqueue(["rm", "-rf", "--", root.scratchDir + "/extract"], {}, () => {
+                    _enqueue(["mkdir", "-p", "--", root.scratchDir + "/extract"], {}, () => {
+                        _enqueue(["tar", "--no-overwrite-dir", "--no-same-owner",
+                                  "--no-same-permissions", "--warning=no-unknown-keyword",
+                                  "-C", root.scratchDir + "/extract", "-xf",
+                                  root.scratchDir + "/item.tar"], {}, (xc, xo) => {
+                            _rmScratch("item.tar")
                             if (root._stale(gen)) { done(null); return }
-                            if (fc !== 0) { done(null); return }
-                            root._migratePlan(entry, String(fo || ""), done, gen)
+                            if (xc !== 0) { done(null); return }
+                            // Constant script; only the tree root travels as an
+                            // argument. %P gives paths relative to it.
+                            _enqueue(["sh", "-c",
+                                      'find "$1" -mindepth 1 ! -type l \\( -type f -o -type d \\) -printf \'%y\\t%s\\t%P\\n\' | sort',
+                                      "omasafe-find", root.scratchDir + "/extract"], {}, (fc, fo) => {
+                                if (root._stale(gen)) { done(null); return }
+                                if (fc !== 0) { done(null); return }
+                                root._migratePlan(entry, String(fo || ""), done, gen)
+                            })
                         })
                     })
                 })
             })
+        }, () => {
+            done(null)
         })
     }
 
@@ -1145,8 +1516,8 @@ Item {
                     done(null, 0)
                     return
                 }
-                _enqueue(_cipherArgv(f.disk, root.vaultDir + "/" + id, "OS_KEY", false),
-                         { OS_KEY: root.sessionKey }, (ec, eo) => {
+                _enqueue(_cipherArgv(f.disk, root.vaultDir + "/" + id, false),
+                         { OS_SECRET: root.sessionKey }, (ec, eo) => {
                     if (root._stale(gen)) {
                         done(null, 0)
                         return
@@ -1180,7 +1551,13 @@ Item {
         }
         const gen = root._generation
         const json = JSON.stringify({ version: 2, items: root.items })
-        _writeScratch("index.json", json, () => {
+        _writeScratch("index.json", json, wcode => {
+            if (wcode !== 0) {
+                root._emitToast("Could not update the safe's index")
+                if (done)
+                    done(false)
+                return
+            }
             // The env below is captured at this exact moment, so the guard
             // has to sit here too — a lock that landed while the scratch
             // write ran left sessionKey empty, and the check above the
@@ -1191,8 +1568,8 @@ Item {
                     done(false)
                 return
             }
-            _cipherAtomic(root.scratchDir + "/index.json", root.indexPath, "OS_KEY",
-                          { OS_KEY: root.sessionKey }, (ok) => {
+            _cipherAtomic(root.scratchDir + "/index.json", root.indexPath,
+                          { OS_SECRET: root.sessionKey }, (ok) => {
                 _rmScratch("index.json")
                 if (root._stale(gen)) {
                     if (done)
@@ -1299,8 +1676,8 @@ Item {
                     return
                 }
                 const vaultPath = root._uniqueVaultPath(folderPath, name, root._takenPaths())
-                _enqueue(_cipherArgv(path, root.vaultDir + "/" + id, "OS_KEY", false),
-                         { OS_KEY: root.sessionKey }, (ec, eo) => {
+                _enqueue(_cipherArgv(path, root.vaultDir + "/" + id, false),
+                         { OS_SECRET: root.sessionKey }, (ec, eo) => {
                     if (ec !== 0) {
                         root.busyLabel = ""
                         root._emitToast("Could not lock " + name)
@@ -1313,11 +1690,11 @@ Item {
         return true
     }
 
-    // Blob written and verified by openssl's exit code: record it in the
-    // index, then — and only then — remove the original. A lock that landed
-    // mid-pipeline stops here: the blob survives as an unindexed orphan
-    // (harmless), the original stays on disk, and nothing is rewritten
-    // under an empty key.
+    // Blob written and authenticated by the crypto helper's exit code:
+    // record it in the index, then — and only then — remove the original.
+    // A lock that landed mid-pipeline stops here: the blob survives as an
+    // unindexed orphan (harmless), the original stays on disk, and nothing
+    // is rewritten under an empty key.
     function _stashCommit(id, vaultPath, size, originalPath, gen) {
         if (root._stale(gen)) {
             root.busyLabel = ""
@@ -1557,25 +1934,35 @@ Item {
                 // Files decrypt into the scratch dir and are renamed into
                 // place: a rename replaces whatever sits at the target
                 // (including a hostile symlink) instead of following it,
-                // and the write lands atomically.
-                _enqueue(_cipherArgv(blobPath, root.scratchDir + "/export.bin", "OS_KEY", true),
-                         { OS_KEY: root.sessionKey }, (dc, do2) => {
-                    if (dc !== 0) {
-                        _rmScratch("export.bin")
-                        root.busyLabel = ""
-                        root._emitToast("Could not unlock " + name)
-                        return
-                    }
-                    _enqueue(["mv", "--", root.scratchDir + "/export.bin",
-                              root.exportDir + "/" + finalName], {}, (vc, vo) => {
-                        if (vc !== 0)
+                // and the write lands atomically. The scratch write itself
+                // sits behind the gate.
+                _withScratch(() => {
+                    _enqueue(_cipherArgv(blobPath, root.scratchDir + "/export.bin", true),
+                             { OS_SECRET: root.sessionKey }, (dc, do2) => {
+                        if (dc !== 0 && dc !== root.exitLegacy) {
                             _rmScratch("export.bin")
-                        root.busyLabel = ""
-                        if (vc !== 0)
-                            root._emitToast("Could not move " + name + " out of the safe")
-                        else
-                            root._emitToast("Saved " + finalName + " to Downloads/OmaSafe")
+                            root.busyLabel = ""
+                            root._emitToast("Could not unlock " + name)
+                            return
+                        }
+                        // A legacy blob is re-tagged in place from the
+                        // plaintext sitting in scratch right now.
+                        if (dc === root.exitLegacy)
+                            root._reencryptBlob(root.scratchDir + "/export.bin", item.id, gen)
+                        _enqueue(["mv", "--", root.scratchDir + "/export.bin",
+                                  root.exportDir + "/" + finalName], {}, (vc, vo) => {
+                            if (vc !== 0)
+                                _rmScratch("export.bin")
+                            root.busyLabel = ""
+                            if (vc !== 0)
+                                root._emitToast("Could not move " + name + " out of the safe")
+                            else
+                                root._emitToast("Saved " + finalName + " to Downloads/OmaSafe")
+                        })
                     })
+                }, () => {
+                    root.busyLabel = ""
+                    root._emitToast("Could not unlock " + name)
                 })
             })
         })
@@ -1652,36 +2039,52 @@ Item {
     // Pre-0.4.0 tar folder: decrypt, unpack in scratch, move into place.
     function _extractLegacyTar(item, finalName, name, gen) {
         const blobPath = root.vaultDir + "/" + item.id
-        _enqueue(_cipherArgv(blobPath, root.scratchDir + "/item.tar", "OS_KEY", true),
-                 { OS_KEY: root.sessionKey }, (dc, dOut) => {
-            if (dc !== 0) {
-                _rmScratch("item.tar")
-                root.busyLabel = ""
-                root._emitToast("Could not unlock " + name)
-                return
-            }
-            _enqueue(["rm", "-rf", "--", root.scratchDir + "/extract"], {}, () => {
-                _enqueue(["mkdir", "-p", "--", root.scratchDir + "/extract"], {}, () => {
-                    _enqueue(["tar", "-C", root.scratchDir + "/extract", "-xf",
-                              root.scratchDir + "/item.tar"], {}, (xc, xo) => {
-                        _rmScratch("item.tar")
-                        if (xc !== 0) {
-                            root.busyLabel = ""
-                            root._emitToast("Could not unpack " + name)
-                            return
-                        }
-                        _enqueue(["mv", "--", root.scratchDir + "/extract/" + SafeModel.safeName(name),
-                                  root.exportDir + "/" + finalName], {}, (vc, vo) => {
-                            _enqueue(["rm", "-rf", "--", root.scratchDir + "/extract"], {}, () => {})
-                            root.busyLabel = ""
-                            if (vc !== 0)
-                                root._emitToast("Could not move " + name + " out of the safe")
-                            else
-                                root._emitToast("Saved " + finalName + " to Downloads/OmaSafe")
+        _withScratch(() => {
+            _enqueue(_cipherArgv(blobPath, root.scratchDir + "/item.tar", true),
+                     { OS_SECRET: root.sessionKey }, (dc, dOut) => {
+                if (dc !== 0 && dc !== root.exitLegacy) {
+                    _rmScratch("item.tar")
+                    root.busyLabel = ""
+                    root._emitToast("Could not unlock " + name)
+                    return
+                }
+                // A legacy blob is re-tagged in place from the plaintext
+                // sitting in scratch right now.
+                if (dc === root.exitLegacy)
+                    root._reencryptBlob(root.scratchDir + "/item.tar", item.id, gen)
+                _enqueue(["rm", "-rf", "--", root.scratchDir + "/extract"], {}, () => {
+                    _enqueue(["mkdir", "-p", "--", root.scratchDir + "/extract"], {}, () => {
+                        // Hardened extraction: no overwriting outside the
+                        // target, no member ownership/permissions, and
+                        // unknown tar extensions are ignored rather than
+                        // fatal — the ciphertext was authenticated before
+                        // any of this ran.
+                        _enqueue(["tar", "--no-overwrite-dir", "--no-same-owner",
+                                  "--no-same-permissions", "--warning=no-unknown-keyword",
+                                  "-C", root.scratchDir + "/extract", "-xf",
+                                  root.scratchDir + "/item.tar"], {}, (xc, xo) => {
+                            _rmScratch("item.tar")
+                            if (xc !== 0) {
+                                root.busyLabel = ""
+                                root._emitToast("Could not unpack " + name)
+                                return
+                            }
+                            _enqueue(["mv", "--", root.scratchDir + "/extract/" + SafeModel.safeName(name),
+                                      root.exportDir + "/" + finalName], {}, (vc, vo) => {
+                                _enqueue(["rm", "-rf", "--", root.scratchDir + "/extract"], {}, () => {})
+                                root.busyLabel = ""
+                                if (vc !== 0)
+                                    root._emitToast("Could not move " + name + " out of the safe")
+                                else
+                                    root._emitToast("Saved " + finalName + " to Downloads/OmaSafe")
+                            })
                         })
                     })
                 })
             })
+        }, () => {
+            root.busyLabel = ""
+            root._emitToast("Could not unlock " + name)
         })
     }
 
@@ -1759,10 +2162,15 @@ Item {
             root.busyLabel = ""
             root.lastError = "The current password or back-up key is wrong"
         }
-        _enqueue(_cipherArgv(root.wrapPath, "", "OS_OLD", true), { OS_OLD: old }, (code, out) => {
+        _enqueue(_cipherArgv(root.wrapPath, "", true), { OS_SECRET: old }, (code, out) => {
             if (root._stale(gen))
                 return
-            if (code === 0 && out.trim() === root.sessionKey) {
+            if (code === 3) {
+                root.busyLabel = ""
+                root.lastError = "The safe's files were tampered with — refused"
+                return
+            }
+            if ((code === 0 || code === root.exitLegacy) && out.trim() === root.sessionKey) {
                 root._rotateSecrets(newPassword, gen)
                 return
             }
@@ -1771,10 +2179,15 @@ Item {
                 fail()
                 return
             }
-            _enqueue(_cipherArgv(root.recoveryPath, "", "OS_RK", true), { OS_RK: rk }, (code2, out2) => {
+            _enqueue(_cipherArgv(root.recoveryPath, "", true), { OS_SECRET: rk }, (code2, out2) => {
                 if (root._stale(gen))
                     return
-                if (code2 !== 0 || out2.trim() !== root.sessionKey) {
+                if (code2 === 3) {
+                    root.busyLabel = ""
+                    root.lastError = "The safe's files were tampered with — refused"
+                    return
+                }
+                if ((code2 !== 0 && code2 !== root.exitLegacy) || out2.trim() !== root.sessionKey) {
                     fail()
                     return
                 }
@@ -1803,7 +2216,12 @@ Item {
                 root._emitToast("The safe locked — the password was not changed")
                 return
             }
-            _writeScratch("vkey", root.sessionKey, () => {
+            _writeScratch("vkey", root.sessionKey, wcode => {
+                if (wcode !== 0) {
+                    done()
+                    root._emitToast("Could not change the password — nothing was changed")
+                    return
+                }
                 // Env for both wraps below is captured here — re-check.
                 if (root._stale(gen) || !SafeModel.isHex64(root.sessionKey)) {
                     _rmScratch("vkey")
@@ -1811,16 +2229,16 @@ Item {
                     root._emitToast("The safe locked — the password was not changed")
                     return
                 }
-                _cipherAtomic(root.scratchDir + "/vkey", root.wrapPath, "OS_PW",
-                              { OS_PW: newPassword }, ok1 => {
+                _cipherAtomic(root.scratchDir + "/vkey", root.wrapPath,
+                              { OS_SECRET: newPassword }, ok1 => {
                     if (!ok1) {
                         _rmScratch("vkey")
                         done()
                         root._emitToast("Could not change the password — nothing was changed")
                         return
                     }
-                    _cipherAtomic(root.scratchDir + "/vkey", root.recoveryPath, "OS_RK",
-                                  { OS_RK: rk }, ok2 => {
+                    _cipherAtomic(root.scratchDir + "/vkey", root.recoveryPath,
+                                  { OS_SECRET: rk }, ok2 => {
                         _rmScratch("vkey")
                         done()
                         if (!ok2) {
@@ -1877,8 +2295,7 @@ Item {
     }
 
     function _keyringHelperPath() {
-        const u = Qt.resolvedUrl("keyring-create.py").toString()
-        return u.indexOf("file://") === 0 ? u.substring(7) : u
+        return root._helperPath("keyring-create.py")
     }
 
     // One-time creation of the dedicated keyring. Creating a Secret
