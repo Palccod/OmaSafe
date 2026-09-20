@@ -78,12 +78,14 @@ password and `recovery.enc` under the back-up key — and exists in memory
 only while the safe is unlocked; neither the password nor the back-up key
 is stored anywhere. Plaintext exists on disk only for the milliseconds an
 operation takes, in a private tmpfs scratch directory under `XDG_RUNTIME_DIR`
-(a per-UID fallback under `/tmp` where the desktop provides no runtime
-directory — created and re-verified, owner and mode included, immediately
-before every use), and is deleted immediately — the one exception is the
-drag-out staging area, which holds a decrypted copy from the moment you
-press an item until you drop it (and never longer than ten minutes or the
-next lock).
+(where the desktop provides no runtime directory, a freshly randomized
+`mktemp -d` directory under `/tmp` is created at boot instead — nothing
+predictable to race, sticky `/tmp` keeps other users from touching it once
+it exists — and the whole tree is re-verified, owner and mode included,
+immediately before every use), and is deleted immediately — the one
+exception is the drag-out staging area, which holds a decrypted copy from
+the moment you press an item until you drop it (and never longer than ten
+minutes or the next lock).
 
 Safes created before back-up keys were separate from the vault key are
 upgraded automatically on their first unlock: a fresh back-up key is issued

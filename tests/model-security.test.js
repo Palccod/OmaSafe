@@ -48,6 +48,22 @@ test("runtime source declares bounded inputs and stronger new passwords", () => 
     assert.match(widget, /Password \(12\+ characters\)/)
 })
 
+test("the /tmp scratch fallback is a race-safe randomized mktemp base", () => {
+    const service = readFileSync(new URL("../Service.qml", import.meta.url), "utf8")
+    // The fallback base comes from mktemp -d — a fresh, unguessable name
+    // created atomically, not a predictable path an attacker can pre-create
+    // or race a symlink into (marketplace review, round 2).
+    assert.match(service, /mktemp -d \/tmp\/omasafe-/)
+    // The mktemp result is validated against its exact expected shape
+    // before it becomes the base.
+    assert.match(service, /\/\^\\\/tmp\\\/omasafe-\[A-Za-z0-9\]\+\$\/\.test\(base\)/)
+    // The old predictable forms must be gone.
+    assert.doesNotMatch(service, /"\/tmp\/omasafe-" \+/)
+    assert.doesNotMatch(service, /root\._uid/)
+    // No base, no gate: with the fallback unset everything refuses.
+    assert.match(service, /scratchBase === ""/)
+})
+
 test("keyring copies travel through the environment, never argv", () => {
     const service = readFileSync(new URL("../Service.qml", import.meta.url), "utf8")
     // The store script pipes the key from an env var into secret-tool stdin.

@@ -115,19 +115,28 @@ Item {
     readonly property string home: Quickshell.env("HOME") || ""
     readonly property string dataHome: Quickshell.env("XDG_DATA_HOME") || (home + "/.local/share")
     readonly property string stateHome: Quickshell.env("XDG_STATE_HOME") || (home + "/.local/state")
-    readonly property string runtimeDir: Quickshell.env("XDG_RUNTIME_DIR") || ""
-    // Filled at boot (`id -u`); only the /tmp fallback below needs it.
-    property string _uid: ""
+    // OMASAFE_FORCE_TMP_FALLBACK=1 is a test seam: it pretends the desktop
+    // gave no XDG_RUNTIME_DIR so the /tmp fallback below can be exercised
+    // in the harness (quickshell itself needs XDG_RUNTIME_DIR for Wayland,
+    // so the variable cannot simply be unset there).
+    readonly property string runtimeDir: Quickshell.env("OMASAFE_FORCE_TMP_FALLBACK") === "1"
+                                         ? "" : (Quickshell.env("XDG_RUNTIME_DIR") || "")
     readonly property string vaultDir: dataHome + "/.omasafe/vault"
     // Plaintext exists here only for the milliseconds an operation takes;
     // the directory is tmpfs on a normal Omarchy install and wiped on logout.
-    // The fallback when the desktop gives no XDG_RUNTIME_DIR is NOT the
-    // shared, predictable /tmp/omasafe — it is a per-UID directory under
-    // /tmp, and every use of the scratch tree is gated by
+    // The fallback when the desktop gives no XDG_RUNTIME_DIR is NOT a
+    // predictable path under /tmp — it is a freshly randomized `mktemp -d`
+    // directory created at boot. There is no name an attacker can pre-create
+    // or win a race on, and once it exists, the sticky bit on /tmp keeps any
+    // other user from renaming, replacing or linking over it, while its 0700
+    // mode keeps them out of it entirely — so the path-based checks and uses
+    // below cannot be interleaved with attacker-created links the way a
+    // predictable path could. Every use of the tree is still gated by
     // omasafe-scratch-verify.sh, which refuses symlinks, foreign owners and
-    // loose modes immediately before anything sensitive is written or removed.
+    // loose modes before anything sensitive is written or removed.
+    property string _tmpBase: ""
     readonly property string scratchBase: runtimeDir !== "" ? runtimeDir
-                                                            : "/tmp/omasafe-" + root._uid
+                                                            : root._tmpBase
     readonly property string scratchDir: scratchBase + "/omasafe"
     // Plaintext staged here only while an item is being dragged out of the
     // card; wiped when the safe locks, or after ten minutes, whichever
@@ -276,15 +285,21 @@ Item {
 
     // --- the scratch gate -------------------------------------------------------
     //
-    // The scratch tree holds plaintext for milliseconds at a time, so it is
-    // held to the letter of the review that flagged the old /tmp/omasafe:
-    // per-UID when the desktop gives no runtime dir, and verified
-    // immediately before every sensitive write or removal. The gate is one
-    // queue job (omasafe-scratch-verify.sh): a symlink is never followed, a
-    // foreign-owned or loose-mode directory fails the check, and only an
-    // all-ok run lets the guarded jobs enqueue.
+    // The scratch tree holds plaintext for milliseconds at a time. Its base
+    // is kernel-protected — XDG_RUNTIME_DIR, or a boot-time mktemp -d
+    // directory under sticky /tmp — so no other user can plant anything in
+    // or over it. The gate is one queue job (omasafe-scratch-verify.sh) that
+    // verifies the tree before every sensitive write or removal anyway: a
+    // symlink is never followed, a foreign-owned or loose-mode directory
+    // fails the check, and only an all-ok run lets the guarded jobs enqueue.
+    // No base, no gate: with the fallback unset (mktemp failed) everything
+    // refuses.
 
     function _scratchVerify(done) {
+        if (root.scratchBase === "") {
+            done(false)
+            return
+        }
         const dirs = root.runtimeDir === ""
             ? [root.scratchBase, root.scratchDir, root.stageDir]
             : [root.scratchDir, root.stageDir]
@@ -365,19 +380,32 @@ Item {
         })
     }
 
-    Component.onCompleted: {
-        // The /tmp scratch fallback needs the uid for its per-UID path, so
-        // boot is enqueued from this job's callback — after the uid is
-        // known. With XDG_RUNTIME_DIR set (the normal case) the value is
-        // simply unused.
-        _enqueue(["sh", "-c", "id -u"], {}, (c, out) => {
-            root._uid = out.trim()
-            root._boot()
-        })
-    }
+    Component.onCompleted: root._boot()
 
     function _boot() {
         Quickshell.execDetached(["mkdir", "-p", root.stateHome + "/omarchy/plugins"])
+        if (root.runtimeDir === "") {
+            // Race-safe fallback base: mktemp -d creates a directory that
+            // did not exist an instant before, under a random name — there
+            // is nothing to pre-create or race. The result is validated
+            // against the exact expected shape before it becomes the base.
+            _enqueue(["sh", "-c",
+                      'd="$(mktemp -d /tmp/omasafe-XXXXXXXXXX)" && chmod 700 -- "$d" && printf %s "$d"',
+                      "omasafe-mktmpbase"], {}, (c, out) => {
+                const base = out.trim()
+                if (c !== 0 || !/^\/tmp\/omasafe-[A-Za-z0-9]+$/.test(base)) {
+                    root.lastError = "Could not create a private scratch directory"
+                    return
+                }
+                root._tmpBase = base
+                root._bootVault()
+            })
+            return
+        }
+        root._bootVault()
+    }
+
+    function _bootVault() {
         _mkdirs(ok => {
             if (!ok) {
                 root.lastError = "The safe's folders are not secure"
