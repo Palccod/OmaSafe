@@ -4,6 +4,7 @@ import QtQuick
 import Quickshell
 import Quickshell.Io
 import "SafeModel.js" as SafeModel
+import "bridge" as OmaSafeBridge
 
 // OmaSafe's vault: every secret, every crypto operation, and every bit of
 // filesystem state lives here, instantiated once by the shell. Bar widgets
@@ -380,7 +381,17 @@ Item {
         })
     }
 
-    Component.onCompleted: root._boot()
+    Component.onCompleted: {
+        // Publish for widgets hosted by replacement bars (ruixen.bar etc.),
+        // whose `bar.shell` facade cannot resolve plugin services. See
+        // bridge/Bridge.qml; the host facade stays the primary path.
+        OmaSafeBridge.Bridge.service = root
+        root._boot()
+    }
+
+    // Unpublish so a widget falling back to the bridge never binds to a
+    // dying instance.
+    Component.onDestruction: if (OmaSafeBridge.Bridge.service === root) OmaSafeBridge.Bridge.service = null
 
     function _boot() {
         Quickshell.execDetached(["mkdir", "-p", root.stateHome + "/omarchy/plugins"])

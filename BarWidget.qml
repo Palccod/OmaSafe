@@ -6,6 +6,7 @@ import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "SafeModel.js" as SafeModel
+import "bridge" as OmaSafeBridge
 
 // OmaSafe — the bar end of the plugin. The button is a drop target (drag a
 // file onto it mid-drag, exactly like the ledge), the popout is everything
@@ -23,7 +24,18 @@ Panel {
     moduleName: "palccod.omasafe"
     ipcTarget: "palccod.omasafe"
 
-    readonly property var svc: bar && bar.shell ? bar.shell.serviceFor("palccod.omasafe") : null
+    // Primary path: the bar host's scoped facade — the first-party bar scopes
+    // it to this plugin, so serviceFor() reaches our own live service.
+    // Fallback: the engine-wide bridge singleton. Replacement bars (e.g.
+    // ruixen.bar) are handed a facade whose serviceFor() is a deliberate null
+    // stub — Omarchy never exposes service resolution to them — so widgets
+    // they host would otherwise never see the service. The binding
+    // re-evaluates on its own when the service publishes (or is torn down).
+    readonly property var svc: {
+        var viaHost = bar && bar.shell && typeof bar.shell.serviceFor === "function"
+            ? bar.shell.serviceFor("palccod.omasafe") : null
+        return viaHost || OmaSafeBridge.Bridge.service
+    }
     readonly property string phase: svc ? svc.phase : "empty"
 
     readonly property color foreground: bar ? bar.barForeground : Color.foreground
