@@ -205,3 +205,42 @@ test("parseKeyringSecret accepts only the last full 64-hex secret line", () => {
   assert.equal(model.parseKeyringSecret(""), "");
   assert.equal(model.parseKeyringSecret(null), "");
 });
+
+test("searchItems matches base names case-insensitively, folders first", () => {
+  // Objects built inside the vm context have a foreign prototype, so compare
+  // flattened path strings instead of deepEqual on the objects themselves.
+  const flat = (r) => Array.from(r.items, (i) => i.path);
+  assert.deepEqual(flat(model.searchItems(sampleItems, "SEA")), ["/photos/vacation/sea.jpg"]);
+  assert.deepEqual(flat(model.searchItems(sampleItems, "jpg")), ["/photos/cat.jpg", "/photos/vacation/sea.jpg"]);
+  // A folder name matches the folder entry, not everything inside it.
+  assert.deepEqual(flat(model.searchItems(sampleItems, "photo")), ["/photos"]);
+  // Substring matching: "vacation" contains "cat", so both the folder and
+  // the file match — folders sort first.
+  assert.deepEqual(flat(model.searchItems(sampleItems, "  cat  ")), ["/photos/vacation", "/photos/cat.jpg"]);
+});
+
+test("searchItems caps results and flags the truncation", () => {
+  const many = Array.from({ length: 12 }, (_, i) => ({
+    path: "/f/a" + i + ".txt", isDir: false, size: 1, name: "a" + i + ".txt",
+  }));
+  const capped = model.searchItems(many, "a", 10);
+  assert.equal(capped.items.length, 10);
+  assert.equal(capped.truncated, true);
+  assert.equal(model.searchItems(many, "a0", 10).truncated, false);
+  // A non-positive limit falls back to the default cap.
+  assert.equal(model.searchItems(many, "a", 0).items.length, 12);
+});
+
+test("searchItems treats empty queries and bad input as no matches", () => {
+  // Result arrays come from the vm context (foreign prototype), so only
+  // primitive checks and flattened arrays can be compared strictly.
+  assert.equal(model.searchItems(sampleItems, "").items.length, 0);
+  assert.equal(model.searchItems(sampleItems, "   ").items.length, 0);
+  assert.equal(model.searchItems(null, "cat").items.length, 0);
+  assert.deepEqual(model.searchItems(undefined, "cat").truncated, false);
+  // Entries without a usable path are skipped, not a crash.
+  assert.deepEqual(
+    Array.from(model.searchItems([null, {}, { path: 42 }, { path: "/ok.txt", isDir: false, name: "ok.txt" }], "ok").items, (i) => i.path),
+    ["/ok.txt"],
+  );
+});

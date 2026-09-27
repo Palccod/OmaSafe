@@ -56,6 +56,7 @@ Panel {
     readonly property string glyphChevronLeft: "\u{F0141}"   // nf-md-chevron-left
     readonly property string glyphGrid: "\u{F0570}"          // nf-md-view-grid
     readonly property string glyphList: "\u{F0572}"          // nf-md-view-list
+    readonly property string glyphSearch: "\u{F0349}"        // nf-md-magnify
 
     // Which card to show is derived state — the service is the only source
     // of truth, so a lock from IPC or the timer lands the card back on the
@@ -78,6 +79,20 @@ Panel {
     property bool deleteConfirmOpen: false
     property string deletePath: ""
     property bool gridMode: false
+    // Search: filters the whole vault by base name, independent of the open
+    // folder. Cleared by Escape, any navigation, revealing a result, or the
+    // card closing or locking.
+    property string searchQuery: ""
+    readonly property bool searchMode: root.searchQuery.trim().length > 0
+    readonly property var searchResults: root.searchMode && root.svc
+        ? SafeModel.searchItems(root.svc.items, root.searchQuery, 200)
+        : { items: [], truncated: false }
+    // What the list and grid Repeaters show: search results while a search
+    // is live, otherwise the open folder's children.
+    readonly property var currentListing: root.searchMode ? root.searchResults.items
+        : (root.svc ? root.svc.visibleItems : [])
+    // A revealed file flashes its row for a moment after the jump.
+    property string flashPath: ""
     property string setupError: ""
     property string unlockText: ""
     property string setupPass: ""
@@ -96,6 +111,24 @@ Panel {
         toastTimer.restart()
     }
 
+    function exitSearch() {
+        searchField.text = ""
+        root.flashPath = ""
+    }
+
+    // Jump from a search result to where it lives: folders open in place,
+    // files land in their folder with the row flashing briefly.
+    function revealItem(path, isDir) {
+        if (!root.svc)
+            return
+        root.svc.navigate(isDir ? path : SafeModel.parentOf(path))
+        root.exitSearch()
+        if (!isDir) {
+            root.flashPath = String(path)
+            flashTimer.restart()
+        }
+    }
+
     Connections {
         target: root.svc
         function onToast(message) {
@@ -112,6 +145,7 @@ Panel {
             root.changeNew = ""
             root.changeConfirm = ""
             root.changeError = ""
+            root.exitSearch()
             // A locked safe can offer keyring recovery — check whether the
             // dedicated keyring exists before the unlock card shows.
             if (root.svc && root.svc.phase === "locked")
@@ -136,27 +170,12 @@ Panel {
             bar.releasePopout(root)
     }
 
-    // Ledge-style auto-close: once the pointer has visited the card and then
-    // left it, the card tidies itself away — which also starts the safe's
-    // auto-lock countdown. Held off while a drag-out is in flight, a drop
-    // onto the card is pending, the destroy dialog is open, or the service
-    // is mid-job.
-    property bool pointerHasVisited: false
+    // The old anchored card tidied itself away once the pointer had visited
+    // and left; the floating window behaves like a window and stays open
+    // until it is closed through ESC, its close button, IPC, or the WM.
+    readonly property bool autoCloseArmed: false
+    // True while a drag-out from the card is in flight.
     property bool dragOutActive: false
-    readonly property bool pointerOnCard: !!panel.hovered || !!button.hovered
-    readonly property bool autoCloseArmed: opened && pointerHasVisited
-        && !pointerOnCard && !dragOutActive && !barDropActive
-        && !deleteConfirmOpen && !(svc && svc.busy)
-
-    onPointerOnCardChanged: if (pointerOnCard) root.pointerHasVisited = true
-    onAutoCloseArmedChanged: autoCloseArmed ? autoCloseTimer.restart() : autoCloseTimer.stop()
-
-    Timer {
-        id: autoCloseTimer
-        interval: 3000
-        onTriggered: if (root.autoCloseArmed)
-            root.close()
-    }
 
     onOpenedChanged: {
         syncPopout()
@@ -166,7 +185,7 @@ Panel {
             root.svc.panelOpened()
             root.svc.probeKeyring()
         } else {
-            root.pointerHasVisited = false
+            root.exitSearch()
             root.svc.panelClosed()
         }
     }
@@ -175,6 +194,12 @@ Panel {
         id: toastTimer
         interval: 2400
         onTriggered: root.toastText = ""
+    }
+
+    Timer {
+        id: flashTimer
+        interval: 1400
+        onTriggered: root.flashPath = ""
     }
 
     Timer {
@@ -332,14 +357,10 @@ Panel {
 
     // --- the card --------------------------------------------------------------
 
-    CardPopup {
+    FloatingCard {
         id: panel
 
-        anchorItem: button
-        bar: root.bar
         open: root.opened
-        cardWidth: Style.space(360)
-        cardHeight: panel.fittedHeight(content.implicitHeight, Style.space(560))
         focusTarget: keyCatcher
         onCloseRequested: root.close()
 
@@ -990,6 +1011,10 @@ Panel {
                                 id: crumbs
                                 anchors.left: parent.left
                                 anchors.verticalCenter: parent.verticalCenter
+                                // Stay clear of the layout toggle; overflow
+                                // clips instead of sliding under it.
+                                width: parent.width - Style.space(40)
+                                clip: true
                                 spacing: Style.space(2)
 
                                 PanelActionButton {
@@ -998,8 +1023,10 @@ Panel {
                                     tooltipText: "Up one folder"
                                     foreground: root.foreground
                                     fontFamily: root.fontFamily
-                                    onClicked: if (root.svc)
+                                    onClicked: if (root.svc) {
+                                        root.exitSearch()
                                         root.svc.navigate(SafeModel.parentOf(root.svc.currentFolder))
+                                    }
                                 }
 
                                 Repeater {
@@ -1022,13 +1049,17 @@ Panel {
                                         font.bold: !!root.svc && modelData.path === root.svc.currentFolder
 
                                         TapHandler {
-                                            onTapped: if (root.svc) root.svc.navigate(crumb.modelData.path)
+                                            onTapped: if (root.svc) {
+                                                root.exitSearch()
+                                                root.svc.navigate(crumb.modelData.path)
+                                            }
                                         }
                                     }
                                 }
                             }
 
                             PanelActionButton {
+                                id: layoutToggle
                                 anchors.right: parent.right
                                 anchors.verticalCenter: parent.verticalCenter
                                 iconText: root.gridMode ? root.glyphList : root.glyphGrid
@@ -1039,6 +1070,43 @@ Panel {
                             }
                         }
 
+                        // Search gets its own full-width row: squeezed next
+                        // to the crumbs it overlapped the listing below.
+                        Item {
+                            visible: root.showContents
+                            width: parent.width
+                            height: searchField.height
+
+                            TextField {
+                                id: searchField
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                placeholderText: "Search the whole safe…"
+                                foreground: root.foreground
+                                font.family: root.fontFamily
+                                enabled: !!root.svc && !root.svc.busy
+                                // Room for the clear button when it shows.
+                                rightPadding: root.searchMode ? Style.space(28) : 0
+                                onTextChanged: root.searchQuery = text
+                                Keys.onEscapePressed: root.exitSearch()
+                            }
+
+                            PanelActionButton {
+                                anchors.right: parent.right
+                                anchors.rightMargin: Style.space(4)
+                                anchors.verticalCenter: parent.verticalCenter
+                                visible: root.searchMode
+                                iconText: root.glyphClose
+                                tooltipText: "Clear search"
+                                foreground: root.foreground
+                                fontFamily: root.fontFamily
+                                onClicked: {
+                                    root.exitSearch()
+                                    searchField.forceActiveFocus()
+                                }
+                            }
+                        }
+
                         // Items — list view
                         Column {
                             visible: root.showContents && !root.gridMode
@@ -1046,7 +1114,7 @@ Panel {
                             spacing: Style.space(8)
 
                         Repeater {
-                            model: root.svc ? root.svc.visibleItems : []
+                            model: root.currentListing
 
                             delegate: Rectangle {
                                 id: rowDelegate
@@ -1062,6 +1130,10 @@ Panel {
                                 readonly property bool browsable: rowDelegate.isFolder && modelData.legacy !== true
                                 readonly property string glyph: SafeModel.itemGlyph(rowDelegate.name, modelData.isDir)
                                 readonly property string ext: SafeModel.extOf(rowDelegate.name)
+                                // Where the item lives — in search mode the
+                                // row shows this instead of size, since the
+                                // hit may sit outside the open folder.
+                                readonly property string parentDir: SafeModel.dirname(modelData.path)
                                 readonly property string kindLabel: modelData.isDir
                                     ? "FOLDER" : (rowDelegate.ext !== "" ? rowDelegate.ext.toUpperCase() : "FILE")
                                 readonly property int childCount: rowDelegate.isFolder
@@ -1079,7 +1151,8 @@ Panel {
                                 width: parent.width
                                 implicitHeight: Style.space(56)
                                 radius: Math.min(Style.cornerRadius, Style.space(8))
-                                color: rowDelegate.folderHover || rowHover.hovered ? Qt.alpha(root.foreground, 0.07) : Qt.alpha(root.foreground, 0.035)
+                                color: rowDelegate.modelData.path === root.flashPath ? Qt.alpha(Color.accent, 0.22)
+                                    : rowDelegate.folderHover || rowHover.hovered ? Qt.alpha(root.foreground, 0.07) : Qt.alpha(root.foreground, 0.035)
                                 border.width: 1
                                 border.color: rowDelegate.folderHover
                                     ? Color.accent
@@ -1213,7 +1286,15 @@ Panel {
                                         // inert — extract and destroy live on
                                         // the buttons. A completed drag
                                         // attempt must not also navigate.
-                                        if (!dragging && rowDelegate.browsable && root.svc)
+                                        // In search mode a click reveals the
+                                        // hit at its real location instead.
+                                        if (dragging || !root.svc)
+                                            return
+                                        if (root.searchMode) {
+                                            root.revealItem(rowDelegate.modelData.path, rowDelegate.isFolder)
+                                            return
+                                        }
+                                        if (rowDelegate.browsable)
                                             root.svc.navigate(rowDelegate.modelData.path)
                                     }
                                 }
@@ -1285,6 +1366,8 @@ Panel {
                                         elide: Text.ElideRight
                                         textFormat: Text.PlainText
                                         text: {
+                                            if (root.searchMode)
+                                                return "in " + (rowDelegate.parentDir === "/" ? "safe root" : rowDelegate.parentDir)
                                             if (rowHover.hovered)
                                                 return rowDelegate.stagePath !== ""
                                                     ? "drag · release over a window to copy"
@@ -1343,14 +1426,17 @@ Panel {
 
                         // Items — grid view
                         Grid {
+                            id: tilesGrid
                             visible: root.showContents && root.gridMode
                             width: parent.width
-                            columns: 3
+                            // The floating window can be pulled wide — more
+                            // room, more columns.
+                            columns: Math.max(3, Math.floor(width / Style.space(200)))
                             columnSpacing: Style.space(8)
                             rowSpacing: Style.space(8)
 
-                            Repeater {
-                                model: root.svc ? root.svc.visibleItems : []
+                                Repeater {
+                                model: root.currentListing
 
                                 delegate: Rectangle {
                                     id: tileDelegate
@@ -1364,16 +1450,20 @@ Panel {
                                     readonly property string glyph: SafeModel.itemGlyph(tileDelegate.name, modelData.isDir)
                                     readonly property int childCount: tileDelegate.isFolder
                                         ? (root.svc ? SafeModel.childrenOf(root.svc.items, modelData.path).length : 0) : 0
+                                    // In search mode the tile shows where the
+                                    // hit lives instead of its size.
+                                    readonly property string parentDir: SafeModel.dirname(modelData.path)
                                     readonly property string stagePath: !!root.svc && root.svc.staged && root.svc.staged[modelData.path]
                                         ? String(root.svc.staged[modelData.path].path) : ""
                                     readonly property url thumbUrl: tileDelegate.stagePath !== "" && SafeModel.isImage(tileDelegate.name)
                                         ? SafeModel.urlFromPath(tileDelegate.stagePath) : ""
                                     property bool folderHover: false
 
-                                    width: (parent.width - Style.space(16)) / 3
+                                    width: Math.floor((parent.width - Style.space(16)) / parent.columns)
                                     height: Style.space(84)
                                     radius: Math.min(Style.cornerRadius, Style.space(8))
-                                    color: tileDelegate.folderHover || tileHover.hovered ? Qt.alpha(root.foreground, 0.07) : Qt.alpha(root.foreground, 0.035)
+                                    color: tileDelegate.modelData.path === root.flashPath ? Qt.alpha(Color.accent, 0.22)
+                                        : tileDelegate.folderHover || tileHover.hovered ? Qt.alpha(root.foreground, 0.07) : Qt.alpha(root.foreground, 0.035)
                                     border.width: 1
                                     border.color: tileDelegate.folderHover
                                         ? Color.accent
@@ -1484,7 +1574,15 @@ Panel {
                                         }
 
                                         onClicked: mouse => {
-                                            if (!dragging && tileDelegate.browsable && root.svc)
+                                            // In search mode a click reveals
+                                            // the hit at its real location.
+                                            if (dragging || !root.svc)
+                                                return
+                                            if (root.searchMode) {
+                                                root.revealItem(tileDelegate.modelData.path, tileDelegate.isFolder)
+                                                return
+                                            }
+                                            if (tileDelegate.browsable)
                                                 root.svc.navigate(tileDelegate.modelData.path)
                                         }
                                     }
@@ -1546,7 +1644,9 @@ Panel {
 
                                         Text {
                                             width: parent.width
-                                            text: tileDelegate.isFolder
+                                            text: root.searchMode
+                                                ? "in " + (tileDelegate.parentDir === "/" ? "safe root" : tileDelegate.parentDir)
+                                                : tileDelegate.isFolder
                                                 ? (tileDelegate.childCount === 1 ? "1 item" : tileDelegate.childCount + " items")
                                                 : SafeModel.humanSize(modelData.size)
                                             textFormat: Text.PlainText
@@ -1595,9 +1695,10 @@ Panel {
                         }
 
                         // Empty state — a folder can be empty while the safe
-                        // is not; the wording follows the location.
+                        // is not; the wording follows the location. A live
+                        // search has its own empty story below.
                         Column {
-                            visible: root.showContents
+                            visible: root.showContents && !root.searchMode
                                      && (!root.svc || root.svc.visibleItems.length === 0)
                             width: parent.width
                             spacing: Style.space(6)
@@ -1644,6 +1745,64 @@ Panel {
                                 font.family: root.fontFamily
                                 font.pixelSize: Style.font.bodySmall
                             }
+                        }
+
+                        // Search found nothing — a different story from an
+                        // empty folder.
+                        Column {
+                            visible: root.showContents && root.searchMode
+                                     && root.searchResults.items.length === 0
+                            width: parent.width
+                            spacing: Style.space(6)
+
+                            Item {
+                                width: 1
+                                height: Style.space(6)
+                            }
+
+                            Text {
+                                width: parent.width
+                                text: root.glyphSearch
+                                textFormat: Text.PlainText
+                                horizontalAlignment: Text.AlignHCenter
+                                color: Qt.alpha(root.foreground, 0.5)
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.display
+                            }
+
+                            Text {
+                                width: parent.width
+                                horizontalAlignment: Text.AlignHCenter
+                                text: "No matches for “" + root.searchQuery.trim() + "”"
+                                textFormat: Text.PlainText
+                                color: root.foreground
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.body
+                            }
+
+                            Text {
+                                width: parent.width
+                                horizontalAlignment: Text.AlignHCenter
+                                text: "Search matches file and folder names everywhere in the safe."
+                                textFormat: Text.PlainText
+                                wrapMode: Text.WordWrap
+                                color: Qt.alpha(root.foreground, 0.55)
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.bodySmall
+                            }
+                        }
+
+                        // The result cap is a rendering guard, so say when it
+                        // bit instead of silently hiding matches.
+                        Text {
+                            visible: root.showContents && root.searchMode && root.searchResults.truncated
+                            width: parent.width
+                            text: "Showing the first " + root.searchResults.items.length + " matches — try a longer query."
+                            textFormat: Text.PlainText
+                            horizontalAlignment: Text.AlignHCenter
+                            color: Qt.alpha(root.foreground, 0.55)
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.caption
                         }
                     }
 
@@ -1802,13 +1961,13 @@ Panel {
         }
     }
 
-    // Accent border while a drag hovers the card. Lives outside the CardPopup
-    // on purpose — its default property routes children into the holder, and
-    // the border belongs to the surface itself.
+    // Accent border while a drag hovers the card. Lives outside the
+    // FloatingCard on purpose — its default property routes children into
+    // the holder, and the border belongs to the surface itself.
     Binding {
         target: panel
-        property: "borderSpec"
-        value: Border.flat(Color.accent, Math.max(1, Style.space(2)))
+        property: "accentBorder"
+        value: true
         when: root.cardDropActive
     }
 }

@@ -98,6 +98,37 @@ function subtreeStats(items, folder) {
     return out
 }
 
+// Whole-vault name search for the card's search mode: matches each entry's
+// base name case-insensitively — folders first, then alphabetical, the same
+// order childrenOf gives a folder — capped at `limit` results (default 200).
+// Returns { items, truncated } so the view can say when the cap bit.
+function searchItems(items, query, limit) {
+    const out = { items: [], truncated: false }
+    if (!items)
+        return out
+    const q = String(query === null || query === undefined ? "" : query).trim().toLowerCase()
+    if (q === "")
+        return out
+    const max = isFinite(limit) && limit > 0 ? Math.floor(limit) : 200
+    const matches = []
+    for (let i = 0; i < items.length; i++) {
+        const it = items[i]
+        if (it && typeof it.path === "string"
+            && baseNameOf(it.path).toLowerCase().indexOf(q) !== -1)
+            matches.push(it)
+    }
+    matches.sort(function (a, b) {
+        if (a.isDir !== b.isDir)
+            return a.isDir ? -1 : 1
+        const an = baseNameOf(a.path).toLowerCase()
+        const bn = baseNameOf(b.path).toLowerCase()
+        return an < bn ? -1 : an > bn ? 1 : 0
+    })
+    out.truncated = matches.length > max
+    out.items = matches.slice(0, max)
+    return out
+}
+
 // Breadcrumb chain for a vault path, root first: "/photos/cat.jpg" →
 // [{path: "/", name: ""}, {path: "/photos", name: "photos"}, …].
 function pathSegments(path) {
