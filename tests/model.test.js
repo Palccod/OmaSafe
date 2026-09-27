@@ -244,3 +244,29 @@ test("searchItems treats empty queries and bad input as no matches", () => {
     ["/ok.txt"],
   );
 });
+
+test("sortEntries orders name, newest and largest with folders first", () => {
+  const items = [
+    { path: "/b.txt", isDir: false, size: 5, addedAt: 10, name: "b.txt" },
+    { path: "/a.txt", isDir: false, size: 90, addedAt: 30, name: "a.txt" },
+    { path: "/c.txt", isDir: false, size: 90, addedAt: 20, name: "c.txt" },
+    { path: "/folder", isDir: true, addedAt: 40, name: "folder" },
+  ];
+  const flat = (m, arr) => Array.from(model.sortEntries(arr, m), (i) => i.path);
+  assert.deepEqual(flat(0, items), ["/folder", "/a.txt", "/b.txt", "/c.txt"]);
+  assert.deepEqual(flat(1, items), ["/folder", "/a.txt", "/c.txt", "/b.txt"]);
+  // Largest first, name breaks the size tie.
+  assert.deepEqual(flat(2, items), ["/folder", "/a.txt", "/c.txt", "/b.txt"]);
+  // Ties fall back to name.
+  const tied = [
+    { path: "/y.txt", isDir: false, size: 1, addedAt: 5, name: "y.txt" },
+    { path: "/x.txt", isDir: false, size: 1, addedAt: 5, name: "x.txt" },
+  ];
+  assert.deepEqual(flat(1, tied), ["/x.txt", "/y.txt"]);
+  // A missing addedAt counts as oldest.
+  assert.deepEqual(
+    flat(1, [{ path: "/n.txt", isDir: false, name: "n.txt" }, { path: "/m.txt", isDir: false, addedAt: 7, name: "m.txt" }]),
+    ["/m.txt", "/n.txt"],
+  );
+  assert.equal(model.sortEntries(null, 1).length, 0);
+});

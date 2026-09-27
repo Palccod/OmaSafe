@@ -129,6 +129,37 @@ function searchItems(items, query, limit) {
     return out
 }
 
+// View-side sort for the card's listing. mode: 0 = name (folders first,
+// alphabetical — the childrenOf order), 1 = newest first, 2 = largest first.
+// Folders stay in front in every mode; the key reorders within the groups,
+// name breaks ties.
+function sortEntries(items, mode) {
+    const out = (items || []).slice()
+    if (mode !== 1 && mode !== 2)
+        return out.sort(function (a, b) {
+            if (a.isDir !== b.isDir)
+                return a.isDir ? -1 : 1
+            const an = baseNameOf(a.path).toLowerCase()
+            const bn = baseNameOf(b.path).toLowerCase()
+            return an < bn ? -1 : an > bn ? 1 : 0
+        })
+    return out.sort(function (a, b) {
+        if (a.isDir !== b.isDir)
+            return a.isDir ? -1 : 1
+        let d = 0
+        if (mode === 1)
+            d = (Number(b.addedAt) || 0) - (Number(a.addedAt) || 0)
+        else
+            d = clampInt(b.size, 0, 0, Number.MAX_SAFE_INTEGER)
+                - clampInt(a.size, 0, 0, Number.MAX_SAFE_INTEGER)
+        if (d)
+            return d
+        const an = baseNameOf(a.path).toLowerCase()
+        const bn = baseNameOf(b.path).toLowerCase()
+        return an < bn ? -1 : an > bn ? 1 : 0
+    })
+}
+
 // Breadcrumb chain for a vault path, root first: "/photos/cat.jpg" →
 // [{path: "/", name: ""}, {path: "/photos", name: "photos"}, …].
 function pathSegments(path) {

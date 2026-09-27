@@ -57,6 +57,7 @@ Panel {
     readonly property string glyphGrid: "\u{F0570}"          // nf-md-view-grid
     readonly property string glyphList: "\u{F0572}"          // nf-md-view-list
     readonly property string glyphSearch: "\u{F0349}"        // nf-md-magnify
+    readonly property string glyphSort: "\u{F023F}"          // nf-md-sort
     readonly property string glyphSelect: "\u{F0132}"        // nf-md-checkbox-multiple-marked
 
     // Which card to show is derived state — the service is the only source
@@ -90,9 +91,21 @@ Panel {
         ? SafeModel.searchItems(root.svc.items, root.searchQuery, 200)
         : { items: [], truncated: false }
     // What the list and grid Repeaters show: search results while a search
-    // is live, otherwise the open folder's children.
-    readonly property var currentListing: root.searchMode ? root.searchResults.items
-        : (root.svc ? root.svc.visibleItems : [])
+    // is live, otherwise the open folder's children — run through the view
+    // sort in both cases.
+    readonly property var currentListing: SafeModel.sortEntries(
+        root.searchMode ? root.searchResults.items
+                        : (root.svc ? root.svc.visibleItems : []),
+        root.sortMode)
+    // Listing sort: 0 = name, 1 = newest first, 2 = largest. Session-only;
+    // the settings view will persist it later.
+    property int sortMode: 0
+    readonly property var sortLabels: ["name", "newest first", "largest first"]
+
+    function cycleSort() {
+        root.sortMode = (root.sortMode + 1) % 3
+        root.showToast("Sorted by " + root.sortLabels[root.sortMode])
+    }
     // A revealed file flashes its row for a moment after the jump.
     property string flashPath: ""
     property string setupError: ""
@@ -1099,9 +1112,9 @@ Panel {
                                 id: crumbs
                                 anchors.left: parent.left
                                 anchors.verticalCenter: parent.verticalCenter
-                                // Stay clear of the layout toggle; overflow
-                                // clips instead of sliding under it.
-                                width: parent.width - Style.space(40)
+                                // Stay clear of the toolbar buttons; overflow
+                                // clips instead of sliding under them.
+                                width: parent.width - Style.space(110)
                                 clip: true
                                 spacing: Style.space(2)
 
@@ -1148,7 +1161,7 @@ Panel {
 
                             PanelActionButton {
                                 id: selectToggle
-                                anchors.right: layoutToggle.left
+                                anchors.right: sortToggle.left
                                 anchors.rightMargin: Style.space(4)
                                 anchors.verticalCenter: parent.verticalCenter
                                 iconText: root.selectMode ? root.glyphClose : root.glyphSelect
@@ -1156,6 +1169,18 @@ Panel {
                                 foreground: root.foreground
                                 fontFamily: root.fontFamily
                                 onClicked: root.toggleSelectMode()
+                            }
+
+                            PanelActionButton {
+                                id: sortToggle
+                                anchors.right: layoutToggle.left
+                                anchors.rightMargin: Style.space(4)
+                                anchors.verticalCenter: parent.verticalCenter
+                                iconText: root.glyphSort
+                                tooltipText: "Sort: " + root.sortLabels[root.sortMode] + " — click to change"
+                                foreground: root.foreground
+                                fontFamily: root.fontFamily
+                                onClicked: root.cycleSort()
                             }
 
                             PanelActionButton {
