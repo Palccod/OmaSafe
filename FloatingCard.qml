@@ -18,6 +18,7 @@ FloatingWindow {
 
     property bool open: false
     property Item focusTarget: null
+    property bool geometryInitialized: false
     // Accent flash while a dragged payload hovers the window (the old
     // surface-border behavior, kept for the drop-target feedback).
     property bool accentBorder: false
@@ -32,8 +33,8 @@ FloatingWindow {
 
     title: "OmaSafe"
     visible: open
-    implicitWidth: Style.space(760)
-    implicitHeight: Style.space(580)
+    implicitWidth: Style.space(675)
+    implicitHeight: Style.space(582)
     minimumSize: Qt.size(Style.space(480), Style.space(360))
     color: Color.popups.background
 
@@ -62,6 +63,17 @@ FloatingWindow {
     onOpenChanged: if (open) win.installFloatRule()
 
     onVisibleChanged: {
+        if (visible) {
+            // Hyprland sizes a first map itself and ignores the implicit
+            // request, so the wanted default is committed right after the
+            // surface comes up — once per session; later opens keep
+            // whatever the user resized to.
+            if (!geometryInitialized) {
+                win.width = Style.space(675)
+                win.height = Style.space(582)
+                geometryInitialized = true
+            }
+        }
         if (visible && focusTarget)
             Qt.callLater(function () {
                 if (win.open && win.focusTarget)
