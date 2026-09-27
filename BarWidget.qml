@@ -583,6 +583,7 @@ Panel {
             // listing below is the only thing that scrolls.
             Column {
                 id: fixedTop
+                visible: !root.settingsOpen
                 anchors.top: parent.top
                 anchors.left: parent.left
                 anchors.right: parent.right
@@ -2151,8 +2152,7 @@ Panel {
             // listing's scroll.
             Column {
                 visible: root.showContents && root.settingsOpen
-                width: parent.width
-                height: parent.height
+                anchors.fill: parent
                 spacing: Style.space(10)
 
                 Item {
@@ -2171,14 +2171,28 @@ Panel {
                         font.bold: true
                     }
 
-                    PanelActionButton {
+                    Row {
                         anchors.right: parent.right
                         anchors.verticalCenter: parent.verticalCenter
-                        iconText: root.glyphCheck
-                        tooltipText: "Done"
-                        foreground: root.foreground
-                        fontFamily: root.fontFamily
-                        onClicked: root.settingsOpen = false
+                        spacing: Style.space(2)
+
+                        PanelActionButton {
+                            anchors.verticalCenter: parent.verticalCenter
+                            iconText: root.glyphCheck
+                            tooltipText: "Done"
+                            foreground: root.foreground
+                            fontFamily: root.fontFamily
+                            onClicked: root.settingsOpen = false
+                        }
+
+                        PanelActionButton {
+                            anchors.verticalCenter: parent.verticalCenter
+                            iconText: root.glyphClose
+                            tooltipText: "Close"
+                            foreground: root.foreground
+                            fontFamily: root.fontFamily
+                            onClicked: root.close()
+                        }
                     }
                 }
 
