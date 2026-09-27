@@ -2419,15 +2419,28 @@ Panel {
                         font.pixelSize: Style.font.bodySmall
                     }
 
-                    Text {
+                    // Text previews flick: long files scroll under the
+                    // pinned header and footer instead of getting cut off.
+                    Flickable {
+                        id: previewTextFlick
                         anchors.fill: parent
                         visible: previewBox.isTxt
-                        text: previewBox.stagePath === "" ? "" : root.previewText
-                        textFormat: Text.PlainText
-                        wrapMode: Text.NoWrap
-                        color: root.foreground
-                        font.family: root.fontFamily
-                        font.pixelSize: Style.font.bodySmall
+                        clip: true
+                        contentWidth: width
+                        contentHeight: previewText.implicitHeight
+                        boundsBehavior: Flickable.StopAtBounds
+
+                        Text {
+                            id: previewText
+                            width: previewTextFlick.width
+                            visible: previewBox.isTxt
+                            text: previewBox.stagePath === "" ? "" : root.previewText
+                            textFormat: Text.PlainText
+                            wrapMode: Text.Wrap
+                            color: root.foreground
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.bodySmall
+                        }
                     }
 
                     Text {
