@@ -59,6 +59,7 @@ Panel {
     readonly property string glyphSearch: "\u{F0349}"        // nf-md-magnify
     readonly property string glyphSort: "\u{F023F}"          // nf-md-sort
     readonly property string glyphChevronRight: "\u{F0142}"  // nf-md-chevron-right
+    readonly property string glyphSettings: "\u{F0493}"      // nf-md-cog
     readonly property string glyphSelect: "\u{F0132}"        // nf-md-checkbox-multiple-marked
 
     // Which card to show is derived state — the service is the only source
@@ -253,6 +254,7 @@ Panel {
             root.changeConfirm = ""
             root.changeError = ""
             root.exitSearch()
+            root.settingsOpen = false
             root.selectMode = false
             root.selectedPaths = []
             // A locked safe can offer keyring recovery — check whether the
@@ -368,6 +370,8 @@ Panel {
     property bool previewOpen: false
     property string previewPath: ""
     property string previewText: ""
+    // The settings page, opened from the header gear; swaps out the listing.
+    property bool settingsOpen: false
 
     readonly property var previewablePaths: {
         const out = []
@@ -516,10 +520,14 @@ Panel {
             anchors.fill: parent
             onCloseRequested: {
                 // ESC peels the layers back before it closes the window:
-                // preview, then selection picks, then select mode, then the
-                // card itself.
+                // preview, then settings, then selection picks, then select
+                // mode, then the card itself.
                 if (root.previewOpen) {
                     root.closePreview()
+                    return
+                }
+                if (root.settingsOpen) {
+                    root.settingsOpen = false
                     return
                 }
                 if (root.selectMode) {
@@ -573,6 +581,7 @@ Panel {
 
             Flickable {
                 id: scroll
+                visible: !root.settingsOpen
                 anchors.fill: parent
                 contentWidth: width
                 contentHeight: content.implicitHeight
@@ -636,6 +645,15 @@ Panel {
                                     root.changeError = ""
                                     root.changePwOpen = true
                                 }
+                            }
+
+                            PanelActionButton {
+                                visible: root.showContents
+                                iconText: root.glyphSettings
+                                tooltipText: root.settingsOpen ? "Back to the safe" : "Settings"
+                                foreground: root.foreground
+                                fontFamily: root.fontFamily
+                                onClicked: root.settingsOpen = !root.settingsOpen
                             }
 
                             PanelActionButton {
@@ -2057,81 +2075,6 @@ Panel {
                         }
                     }
 
-                    // Preferences (unlocked only) ---------------------------------
-                    Column {
-                        visible: root.showContents
-                        width: parent.width
-                        spacing: Style.space(10)
-
-                        PanelSeparator {}
-
-                        Toggle {
-                            width: parent.width
-                            label: "Remove originals"
-                            description: "On, a dropped file is moved into the safe. Off, it is only copied, and the original stays where it was."
-                            checked: !!root.svc && root.svc.deleteOriginals
-                            foreground: root.foreground
-                            accent: Color.accent
-                            fontFamily: root.fontFamily
-                            onClicked: {
-                                if (!root.svc)
-                                    return
-                                root.svc.deleteOriginals = !root.svc.deleteOriginals
-                                root.svc._savePrefs()
-                            }
-                        }
-
-                        Toggle {
-                            width: parent.width
-                            label: "Auto-lock after closing"
-                            description: "The safe locks itself " + (root.svc && root.svc.autoLockSeconds > 0
-                                       ? root.svc.autoLockSeconds + " seconds after this card closes"
-                                       : "only when you lock it or quit the shell") + "."
-                            checked: !!root.svc && root.svc.autoLockSeconds > 0
-                            foreground: root.foreground
-                            accent: Color.accent
-                            fontFamily: root.fontFamily
-                            onClicked: {
-                                if (!root.svc)
-                                    return
-                                root.svc.autoLockSeconds = root.svc.autoLockSeconds > 0 ? 0 : 15
-                                root.svc._savePrefs()
-                            }
-                        }
-
-                        Toggle {
-                            width: parent.width
-                            label: "Auto-lock when idle"
-                            description: "The safe locks itself after 10 minutes of no keyboard or mouse activity, wherever the focus is. A running job waits for it to finish."
-                            checked: !!root.svc && root.svc.idleLockMinutes > 0
-                            foreground: root.foreground
-                            accent: Color.accent
-                            fontFamily: root.fontFamily
-                            onClicked: {
-                                if (!root.svc)
-                                    return
-                                root.svc.idleLockMinutes = root.svc.idleLockMinutes > 0 ? 0 : 10
-                                root.svc._savePrefs()
-                            }
-                        }
-
-                        Toggle {
-                            width: parent.width
-                            label: "Grid thumbnails"
-                            description: "Image tiles and list rows show a decrypted preview thumbnail. The preview lightbox is unaffected."
-                            checked: !!root.svc && root.svc.showThumbnails
-                            foreground: root.foreground
-                            accent: Color.accent
-                            fontFamily: root.fontFamily
-                            onClicked: {
-                                if (!root.svc)
-                                    return
-                                root.svc.showThumbnails = !root.svc.showThumbnails
-                                root.svc._savePrefs()
-                            }
-                        }
-                    }
-
                     // Footer -------------------------------------------------------
                     Column {
                         width: parent.width
@@ -2174,6 +2117,111 @@ Panel {
                             font.family: root.fontFamily
                             font.pixelSize: Style.font.caption
                         }
+                    }
+                }
+            }
+
+            // Settings view — the preferences as their own page, reachable
+            // from the header gear instead of buried at the bottom of the
+            // listing's scroll.
+            Column {
+                visible: root.showContents && root.settingsOpen
+                width: parent.width
+                height: parent.height
+                spacing: Style.space(10)
+
+                Item {
+                    width: parent.width
+                    height: Style.space(26)
+
+                    Text {
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: root.glyphSettings + "  Settings"
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.subtitle
+                        font.bold: true
+                    }
+
+                    PanelActionButton {
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        iconText: root.glyphCheck
+                        tooltipText: "Done"
+                        foreground: root.foreground
+                        fontFamily: root.fontFamily
+                        onClicked: root.settingsOpen = false
+                    }
+                }
+
+                PanelSeparator {}
+
+                Toggle {
+                    width: parent.width
+                    label: "Remove originals"
+                    description: "On, a dropped file is moved into the safe. Off, it is only copied, and the original stays where it was."
+                    checked: !!root.svc && root.svc.deleteOriginals
+                    foreground: root.foreground
+                    accent: Color.accent
+                    fontFamily: root.fontFamily
+                    onClicked: {
+                        if (!root.svc)
+                            return
+                        root.svc.deleteOriginals = !root.svc.deleteOriginals
+                        root.svc._savePrefs()
+                    }
+                }
+
+                Toggle {
+                    width: parent.width
+                    label: "Auto-lock after closing"
+                    description: "The safe locks itself " + (root.svc && root.svc.autoLockSeconds > 0
+                               ? root.svc.autoLockSeconds + " seconds after this card closes"
+                               : "only when you lock it or quit the shell") + "."
+                    checked: !!root.svc && root.svc.autoLockSeconds > 0
+                    foreground: root.foreground
+                    accent: Color.accent
+                    fontFamily: root.fontFamily
+                    onClicked: {
+                        if (!root.svc)
+                            return
+                        root.svc.autoLockSeconds = root.svc.autoLockSeconds > 0 ? 0 : 15
+                        root.svc._savePrefs()
+                    }
+                }
+
+                Toggle {
+                    width: parent.width
+                    label: "Auto-lock when idle"
+                    description: "The safe locks itself after 10 minutes of no keyboard or mouse activity, wherever the focus is. A running job waits for it to finish."
+                    checked: !!root.svc && root.svc.idleLockMinutes > 0
+                    foreground: root.foreground
+                    accent: Color.accent
+                    fontFamily: root.fontFamily
+                    onClicked: {
+                        if (!root.svc)
+                            return
+                        root.svc.idleLockMinutes = root.svc.idleLockMinutes > 0 ? 0 : 10
+                        root.svc._savePrefs()
+                    }
+                }
+
+                Toggle {
+                    width: parent.width
+                    label: "Grid thumbnails"
+                    description: "Image tiles and list rows show a decrypted preview thumbnail. The preview lightbox is unaffected."
+                    checked: !!root.svc && root.svc.showThumbnails
+                    foreground: root.foreground
+                    accent: Color.accent
+                    fontFamily: root.fontFamily
+                    onClicked: {
+                        if (!root.svc)
+                            return
+                        root.svc.showThumbnails = !root.svc.showThumbnails
+                        root.svc._savePrefs()
                     }
                 }
             }
