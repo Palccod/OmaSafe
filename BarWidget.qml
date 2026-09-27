@@ -2102,6 +2102,23 @@ Panel {
                                 root.svc._savePrefs()
                             }
                         }
+
+                        Toggle {
+                            width: parent.width
+                            label: "Dolphin context menu"
+                            description: "Adds a \u201CSend to OmaSafe\u201D entry to the file manager's right-click menu."
+                            checked: !!root.svc && root.svc.dolphinMenu
+                            foreground: root.foreground
+                            accent: Color.accent
+                            fontFamily: root.fontFamily
+                            onClicked: {
+                                if (!root.svc)
+                                    return
+                                root.svc.dolphinMenu = !root.svc.dolphinMenu
+                                root.svc._savePrefs()
+                                root.svc._syncServiceMenu()
+                            }
+                        }
                     }
 
                     // Footer -------------------------------------------------------

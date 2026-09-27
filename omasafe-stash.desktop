@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Service
+X-KDE-ServiceTypes=KonqPopupMenu/Plugin
+MimeType=all/allfiles;inode/directory;
+Actions=omasafeStash;
+X-KDE-Priority=TopLevel
+
+[Desktop Action omasafeStash]
+Name=Send to OmaSafe
+Icon=security-high
+Exec=sh -c 'exec "$HOME/.config/omarchy/plugins/palccod.omasafe/omasafe-stash-menu.sh" "$@"' sh %F

@@ -109,6 +109,9 @@ Item {
     // Idle auto-lock, minutes of no input before the safe locks itself.
     // 0 = off (opt-in from the card's preferences); capped at 4 hours.
     property int idleLockMinutes: 0
+    // Dolphin context menu: the static .desktop service menu is copied into
+    // the user's kio servicemenus dir while this is on, removed when off.
+    property bool dolphinMenu: true
     // Set once the authenticated-format migration pass has swept the vault
     // and found nothing legacy — every write has been tagged since 0.6.0, so
     // a clean pass means the pass never needs to run again.
@@ -121,6 +124,11 @@ Item {
     readonly property string home: Quickshell.env("HOME") || ""
     readonly property string dataHome: Quickshell.env("XDG_DATA_HOME") || (home + "/.local/share")
     readonly property string stateHome: Quickshell.env("XDG_STATE_HOME") || (home + "/.local/state")
+    // The Dolphin service menu: shipped inside the plugin folder, installed
+    // into the user's kio servicemenus dir while dolphinMenu is on.
+    readonly property string serviceMenuSource:
+        String(Qt.resolvedUrl("omasafe-stash.desktop")).replace(/^file:\/\//, "")
+    readonly property string serviceMenuPath: dataHome + "/kio/servicemenus/palccod.omasafe.desktop"
     // OMASAFE_FORCE_TMP_FALLBACK=1 is a test seam: it pretends the desktop
     // gave no XDG_RUNTIME_DIR so the /tmp fallback below can be exercised
     // in the harness (quickshell itself needs XDG_RUNTIME_DIR for Wayland,
@@ -461,6 +469,9 @@ Item {
                 root.idleLockMinutes = SafeModel.clampInt(prefs.idleLockMinutes, 0, 0, 240)
                 if (typeof prefs.cryptoMigrated === "boolean")
                     root.cryptoMigrated = prefs.cryptoMigrated
+                if (typeof prefs.dolphinMenu === "boolean")
+                    root.dolphinMenu = prefs.dolphinMenu
+                root._syncServiceMenu()
             } catch (e) {
                 // First run or a damaged file: defaults are already in place.
             }
@@ -473,8 +484,22 @@ Item {
             deleteOriginals: root.deleteOriginals,
             autoLockSeconds: root.autoLockSeconds,
             idleLockMinutes: root.idleLockMinutes,
+            dolphinMenu: root.dolphinMenu,
             cryptoMigrated: root.cryptoMigrated
         }))
+    }
+
+    // Install or remove the Dolphin service menu. The desktop file itself is
+    // static — its Exec line resolves the helper script through the plugin's
+    // fixed home path — so this is a plain copy in or out.
+    function _syncServiceMenu() {
+        const dir = dataHome + "/kio/servicemenus"
+        if (root.dolphinMenu) {
+            _enqueue(["mkdir", "-p", "--", dir], {}, function () { })
+            _enqueue(["cp", "--", root.serviceMenuSource, root.serviceMenuPath], {}, function () { })
+        } else {
+            _enqueue(["rm", "-f", "--", root.serviceMenuPath], {}, function () { })
+        }
     }
 
     // --- initialization -------------------------------------------------------

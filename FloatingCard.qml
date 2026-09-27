@@ -34,8 +34,6 @@ FloatingWindow {
     visible: open
     implicitWidth: Style.space(760)
     implicitHeight: Style.space(580)
-    width: Style.space(760)
-    height: Style.space(580)
     minimumSize: Qt.size(Style.space(480), Style.space(360))
     color: Color.popups.background
 
