@@ -18,7 +18,6 @@ FloatingWindow {
 
     property bool open: false
     property Item focusTarget: null
-    property bool geometryInitialized: false
     // Accent flash while a dragged payload hovers the window (the old
     // surface-border behavior, kept for the drop-target feedback).
     property bool accentBorder: false
@@ -41,15 +40,23 @@ FloatingWindow {
     function installFloatRule() {
         // New-parser Hyprland rejects `hyprctl keyword` rules entirely and
         // wants Lua window_rule objects (omacom's hyprctl eval); the guard
-        // variable keeps the rule a singleton and re-enables it after a
+        // variable keeps each rule a singleton and re-enables them after a
         // compositor reload. The shell process inherits HYPRLAND_INSTANCE
         // _SIGNATURE from the session, so hyprctl reaches the right instance.
+        // Hyprland sizes a floating window's first map itself and ignores
+        // whatever the client requests, so the default geometry (675x582) is
+        // a compositor rule alongside the float rule; a manual resize lasts
+        // while the window stays open.
         Quickshell.execDetached(["hyprctl", "eval",
             'omasafe_rules = omasafe_rules or {}; '
             + 'if omasafe_rules.float == nil then '
             + 'omasafe_rules.float = hl.window_rule({ name = "omasafe-float", '
             + 'match = { initial_title = "^OmaSafe$" }, float = true }) '
-            + 'else omasafe_rules.float:set_enabled(true) end'])
+            + 'else omasafe_rules.float:set_enabled(true) end; '
+            + 'if omasafe_rules.size == nil then '
+            + 'omasafe_rules.size = hl.window_rule({ name = "omasafe-size", '
+            + 'match = { initial_title = "^OmaSafe$" }, size = "675 582" }) '
+            + 'else omasafe_rules.size:set_enabled(true) end'])
     }
 
     Component.onCompleted: {
@@ -63,17 +70,6 @@ FloatingWindow {
     onOpenChanged: if (open) win.installFloatRule()
 
     onVisibleChanged: {
-        if (visible) {
-            // Hyprland sizes a first map itself and ignores the implicit
-            // request, so the wanted default is committed right after the
-            // surface comes up — once per session; later opens keep
-            // whatever the user resized to.
-            if (!geometryInitialized) {
-                win.width = Style.space(675)
-                win.height = Style.space(582)
-                geometryInitialized = true
-            }
-        }
         if (visible && focusTarget)
             Qt.callLater(function () {
                 if (win.open && win.focusTarget)
