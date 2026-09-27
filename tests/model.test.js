@@ -270,3 +270,13 @@ test("sortEntries orders name, newest and largest with folders first", () => {
   );
   assert.equal(model.sortEntries(null, 1).length, 0);
 });
+
+test("isText whitelist covers documents and code, nothing else", () => {
+  assert.equal(model.isText("notes.md"), true);
+  assert.equal(model.isText("config.YAML"), true);
+  assert.equal(model.isText("script.sh"), true);
+  assert.equal(model.isImage("notes.md"), false);
+  assert.equal(model.isText("report.pdf"), false);
+  assert.equal(model.isText("photo.png"), false);
+  assert.equal(model.isText("noext"), false);
+});

@@ -361,3 +361,14 @@ function itemGlyph(name, isDir) {
 function isImage(name) {
     return imageExts.indexOf(extOf(name)) !== -1
 }
+
+// Extensions the preview lightbox shows as text: the first bytes are read
+// from the decrypted scratch copy. Deliberately conservative — everything
+// else gets the "no preview" note.
+const textExts = ["txt", "md", "log", "json", "csv", "conf", "cfg", "ini",
+                  "xml", "yml", "yaml", "toml", "js", "py", "sh", "html",
+                  "css", "env", "list"]
+
+function isText(name) {
+    return textExts.indexOf(extOf(name)) !== -1
+}

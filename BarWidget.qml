@@ -58,6 +58,7 @@ Panel {
     readonly property string glyphList: "\u{F0572}"          // nf-md-view-list
     readonly property string glyphSearch: "\u{F0349}"        // nf-md-magnify
     readonly property string glyphSort: "\u{F023F}"          // nf-md-sort
+    readonly property string glyphChevronRight: "\u{F0142}"  // nf-md-chevron-right
     readonly property string glyphSelect: "\u{F0132}"        // nf-md-checkbox-multiple-marked
 
     // Which card to show is derived state — the service is the only source
@@ -346,6 +347,49 @@ Panel {
         root.showToast("Back-up key copied")
     }
 
+    function previewStep(delta) {
+        const list = root.previewablePaths
+        if (!list.length)
+            return
+        const idx = list.indexOf(root.previewPath)
+        const next = Math.max(0, Math.min(list.length - 1, (idx < 0 ? 0 : idx + delta)))
+        root.openPreview(list[next])
+    }
+
+    // Preview lightbox: the file currently viewed large. The path must stay
+    // inside the visible listing; the overlay hides itself when it leaves.
+    property bool previewOpen: false
+    property string previewPath: ""
+    property string previewText: ""
+
+    readonly property var previewablePaths: {
+        const out = []
+        for (const it of root.currentListing)
+            if (!it.isDir)
+                out.push(it.path)
+        return out
+    }
+
+    // Files open in the preview lightbox; folders keep navigating. Staging
+    // decrypts the blob to the scratch dir, which is both the image source
+    // and the text reader's input.
+    function openPreview(path) {
+        const p = String(path || "")
+        if (p === "" || !root.svc)
+            return
+        root.previewPath = p
+        root.previewText = ""
+        root.previewOpen = true
+        root.svc.stageItem(p)
+    }
+
+    function closePreview() {
+        root.previewOpen = false
+        root.previewPath = ""
+        root.previewText = ""
+        keyCatcher.forceActiveFocus()
+    }
+
     // --- bar button -----------------------------------------------------------
 
     WidgetButton {
@@ -464,8 +508,13 @@ Panel {
             id: keyCatcher
             anchors.fill: parent
             onCloseRequested: {
-                // ESC peels the selection state back before it closes the
-                // window: picks first, then select mode, then the card.
+                // ESC peels the layers back before it closes the window:
+                // preview, then selection picks, then select mode, then the
+                // card itself.
+                if (root.previewOpen) {
+                    root.closePreview()
+                    return
+                }
                 if (root.selectMode) {
                     if (root.selectedCount > 0)
                         root.selectedPaths = []
@@ -1470,8 +1519,12 @@ Panel {
                                             root.revealItem(rowDelegate.modelData.path, rowDelegate.isFolder)
                                             return
                                         }
-                                        if (rowDelegate.browsable)
+                                        if (rowDelegate.browsable) {
                                             root.svc.navigate(rowDelegate.modelData.path)
+                                            return
+                                        }
+                                        if (!rowDelegate.isFolder)
+                                            root.openPreview(rowDelegate.modelData.path)
                                     }
                                 }
 
@@ -1764,8 +1817,12 @@ Panel {
                                                 root.revealItem(tileDelegate.modelData.path, tileDelegate.isFolder)
                                                 return
                                             }
-                                            if (tileDelegate.browsable)
+                                            if (tileDelegate.browsable) {
                                                 root.svc.navigate(tileDelegate.modelData.path)
+                                                return
+                                            }
+                                            if (!tileDelegate.isFolder)
+                                                root.openPreview(tileDelegate.modelData.path)
                                         }
                                     }
 
@@ -2073,6 +2130,172 @@ Panel {
                             font.family: root.fontFamily
                             font.pixelSize: Style.font.caption
                         }
+                    }
+                }
+            }
+
+            // Preview lightbox — a file viewed large over the listing. It
+            // takes the keyboard while open: ESC closes, the arrows step
+            // through the files of the current listing.
+            Rectangle {
+                id: previewBox
+                anchors.fill: parent
+                z: 15
+                visible: root.previewOpen && root.previewPath !== ""
+                         && root.previewablePaths.indexOf(root.previewPath) !== -1
+                color: Color.background
+
+                readonly property string stagePath: !!root.svc && root.svc.staged && root.svc.staged[root.previewPath]
+                    ? String(root.svc.staged[root.previewPath].path) : ""
+                readonly property bool isImg: SafeModel.isImage(root.previewPath)
+                readonly property bool isTxt: SafeModel.isText(root.previewPath)
+
+                onVisibleChanged: if (visible) previewBox.forceActiveFocus()
+                onStagePathChanged: {
+                    if (visible && isTxt && stagePath !== "") {
+                        previewReader.command = ["head", "-c", "6000", "--", stagePath]
+                        previewReader.running = true
+                    }
+                }
+
+                Process {
+                    id: previewReader
+                    stdout: StdioCollector {
+                        onStreamFinished: root.previewText = this.text
+                    }
+                }
+
+                Keys.onEscapePressed: root.closePreview()
+                Keys.onLeftPressed: root.previewStep(-1)
+                Keys.onRightPressed: root.previewStep(1)
+
+                Item {
+                    id: previewHeader
+                    anchors.top: parent.top
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    height: Style.space(34)
+
+                    Text {
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width - previewClose.implicitWidth - Style.space(20)
+                        text: root.previewPath === "" ? "" : SafeModel.baseNameOf(root.previewPath)
+                        textFormat: Text.PlainText
+                        elide: Text.ElideMiddle
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.subtitle
+                        font.bold: true
+                    }
+
+                    PanelActionButton {
+                        id: previewClose
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        iconText: root.glyphClose
+                        tooltipText: "Close preview"
+                        foreground: root.foreground
+                        fontFamily: root.fontFamily
+                        onClicked: root.closePreview()
+                    }
+                }
+
+                Item {
+                    anchors.top: previewHeader.bottom
+                    anchors.bottom: previewFooter.top
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    anchors.margins: Style.space(8)
+
+                    Image {
+                        id: previewImg
+                        anchors.fill: parent
+                        visible: previewBox.isImg && previewBox.stagePath !== "" && status !== Image.Error
+                        source: visible ? SafeModel.urlFromPath(previewBox.stagePath) : ""
+                        asynchronous: true
+                        fillMode: Image.PreserveAspectFit
+                    }
+
+                    Text {
+                        anchors.centerIn: parent
+                        visible: previewBox.isImg && previewBox.stagePath !== "" && previewImg.status === Image.Error
+                        text: "Qt cannot decode this image format — extract the file to view it"
+                        textFormat: Text.PlainText
+                        color: Qt.alpha(root.foreground, 0.6)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                    }
+
+                    Text {
+                        anchors.fill: parent
+                        visible: previewBox.isTxt
+                        text: previewBox.stagePath === "" ? "" : root.previewText
+                        textFormat: Text.PlainText
+                        wrapMode: Text.NoWrap
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                    }
+
+                    Text {
+                        anchors.centerIn: parent
+                        visible: !previewBox.isImg && !previewBox.isTxt
+                        text: root.glyphSearch + "  no preview for this file type"
+                        textFormat: Text.PlainText
+                        color: Qt.alpha(root.foreground, 0.6)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                    }
+
+                    Text {
+                        anchors.centerIn: parent
+                        visible: (previewBox.isImg || previewBox.isTxt) && previewBox.stagePath === ""
+                        text: "Decrypting…"
+                        textFormat: Text.PlainText
+                        color: Qt.alpha(root.foreground, 0.6)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                    }
+                }
+
+                Item {
+                    id: previewFooter
+                    anchors.bottom: parent.bottom
+                    anchors.left: parent.left
+                    anchors.right: parent.right
+                    height: Style.space(30)
+
+                    PanelActionButton {
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        iconText: root.glyphChevronLeft
+                        tooltipText: "Previous file"
+                        foreground: root.foreground
+                        fontFamily: root.fontFamily
+                        enabled: root.previewablePaths.indexOf(root.previewPath) > 0
+                        onClicked: root.previewStep(-1)
+                    }
+
+                    Text {
+                        anchors.centerIn: parent
+                        text: (root.previewablePaths.indexOf(root.previewPath) + 1) + " / "
+                              + root.previewablePaths.length
+                        textFormat: Text.PlainText
+                        color: Qt.alpha(root.foreground, 0.6)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                    }
+
+                    PanelActionButton {
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        iconText: root.glyphChevronRight
+                        tooltipText: "Next file"
+                        foreground: root.foreground
+                        fontFamily: root.fontFamily
+                        enabled: root.previewablePaths.indexOf(root.previewPath) < root.previewablePaths.length - 1
+                        onClicked: root.previewStep(1)
                     }
                 }
             }
