@@ -44,14 +44,14 @@ Panel {
     // Nerd Font glyphs (md block), codepoints from the official
     // glyphnames.json and confirmed against the installed font's cmap.
     readonly property string glyphShield: "\u{F0499}"        // nf-md-shield
-    readonly property string glyphLock: "\u{F0347}"          // nf-md-lock
-    readonly property string glyphLockOpen: "\u{F0FCB}"      // nf-md-lock-open-variant
+    readonly property string glyphLock: "\u{F033E}"          // nf-md-lock
+    readonly property string glyphLockOpen: "\u{F033F}"      // nf-md-lock-open
     readonly property string glyphDrop: "\u{F0120}"          // nf-md-tray-arrow-down
     readonly property string glyphKey: "\u{F0306}"           // nf-md-key-variant
     readonly property string glyphDownload: "\u{F0192}"      // nf-md-download
     readonly property string glyphTrash: "\u{F01B4}"         // nf-md-delete
     readonly property string glyphClose: "\u{F0156}"         // nf-md-close
-    readonly property string glyphCheck: "\u{F00EC}"         // nf-md-check
+    readonly property string glyphCheck: "\u{F05E0}"         // nf-md-check-circle
     readonly property string glyphFolderOpen: "\u{F0770}"    // nf-md-folder-open
     readonly property string glyphChevronLeft: "\u{F0141}"   // nf-md-chevron-left
     readonly property string glyphGrid: "\u{F0570}"          // nf-md-view-grid
@@ -579,10 +579,292 @@ Panel {
                 }
             }
 
+            // Fixed top: header, toolbar, search, selection — the
+            // listing below is the only thing that scrolls.
+            Column {
+                id: fixedTop
+                anchors.top: parent.top
+                anchors.left: parent.left
+                anchors.right: parent.right
+                spacing: Style.space(6)
+
+                // Header -------------------------------------------------
+                Item {
+                    width: parent.width
+                    height: Style.space(26)
+
+                    Text {
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width * 0.55
+                        text: root.glyphShield + "  OmaSafe"
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.subtitle
+                        font.bold: true
+                    }
+
+                    Row {
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: Style.space(2)
+
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            visible: root.showContents
+                            width: Math.min(implicitWidth, Style.space(80))
+                            text: root.svc
+                                ? (root.svc.itemCount === 1 ? "1 item" : root.svc.itemCount + " items")
+                                : ""
+                            textFormat: Text.PlainText
+                            elide: Text.ElideRight
+                            color: Color.accent
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.bodySmall
+                            rightPadding: Style.space(8)
+                        }
+
+                        PanelActionButton {
+                            visible: root.showContents
+                            iconText: root.glyphKey
+                            tooltipText: "Change password"
+                            foreground: root.foreground
+                            fontFamily: root.fontFamily
+                            onClicked: {
+                                root.changeOld = ""
+                                root.changeNew = ""
+                                root.changeConfirm = ""
+                                root.changeError = ""
+                                root.changePwOpen = true
+                            }
+                        }
+
+                        PanelActionButton {
+                            visible: root.showContents
+                            iconText: root.glyphSettings
+                            tooltipText: root.settingsOpen ? "Back to the safe" : "Settings"
+                            foreground: root.foreground
+                            fontFamily: root.fontFamily
+                            onClicked: root.settingsOpen = !root.settingsOpen
+                        }
+
+                        PanelActionButton {
+                            visible: root.showContents
+                            iconText: root.glyphLock
+                            tooltipText: "Lock now"
+                            foreground: root.foreground
+                            fontFamily: root.fontFamily
+                            onClicked: {
+                                if (root.svc)
+                                    root.svc.lock()
+                                root.close()
+                            }
+                        }
+
+                        PanelActionButton {
+                            iconText: root.glyphClose
+                            tooltipText: "Close"
+                            foreground: root.foreground
+                            fontFamily: root.fontFamily
+                            onClicked: root.close()
+                        }
+                    }
+                }
+
+                // Toolbar: breadcrumbs on the left, layout toggle on
+                // the right.
+                Item {
+                    visible: root.showContents
+                    width: parent.width
+                    height: Style.space(26)
+
+                    Row {
+                        id: crumbs
+                        anchors.left: parent.left
+                        anchors.verticalCenter: parent.verticalCenter
+                        // Stay clear of the toolbar buttons; overflow
+                        // clips instead of sliding under them.
+                        width: parent.width - Style.space(110)
+                        clip: true
+                        spacing: Style.space(2)
+
+                        PanelActionButton {
+                            visible: !!root.svc && root.svc.currentFolder !== "/"
+                            iconText: root.glyphChevronLeft
+                            tooltipText: "Up one folder"
+                            foreground: root.foreground
+                            fontFamily: root.fontFamily
+                            onClicked: if (root.svc) {
+                                root.exitSearch()
+                                root.svc.navigate(SafeModel.parentOf(root.svc.currentFolder))
+                            }
+                        }
+
+                        Repeater {
+                            model: root.svc ? SafeModel.pathSegments(root.svc.currentFolder) : []
+
+                            delegate: Text {
+                                id: crumb
+                                required property int index
+                                required property var modelData
+
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: Math.min(implicitWidth, Style.space(90))
+                                text: (index === 0 ? "" : " / ") + (modelData.name === "" ? "safe" : modelData.name)
+                                textFormat: Text.PlainText
+                                elide: Text.ElideMiddle
+                                color: !!root.svc && modelData.path === root.svc.currentFolder
+                                       ? Color.accent : Qt.alpha(root.foreground, 0.6)
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.bodySmall
+                                font.bold: !!root.svc && modelData.path === root.svc.currentFolder
+
+                                TapHandler {
+                                    onTapped: if (root.svc) {
+                                        root.exitSearch()
+                                        root.svc.navigate(crumb.modelData.path)
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    PanelActionButton {
+                        id: selectToggle
+                        anchors.right: sortToggle.left
+                        anchors.rightMargin: Style.space(4)
+                        anchors.verticalCenter: parent.verticalCenter
+                        iconText: root.selectMode ? root.glyphClose : root.glyphSelect
+                        tooltipText: root.selectMode ? "Stop selecting" : "Select items"
+                        foreground: root.foreground
+                        fontFamily: root.fontFamily
+                        onClicked: root.toggleSelectMode()
+                    }
+
+                    PanelActionButton {
+                        id: sortToggle
+                        anchors.right: layoutToggle.left
+                        anchors.rightMargin: Style.space(4)
+                        anchors.verticalCenter: parent.verticalCenter
+                        iconText: root.glyphSort
+                        tooltipText: "Sort: " + root.sortLabels[root.sortMode] + " — click to change"
+                        foreground: root.foreground
+                        fontFamily: root.fontFamily
+                        onClicked: root.cycleSort()
+                    }
+
+                    PanelActionButton {
+                        id: layoutToggle
+                        anchors.right: parent.right
+                        anchors.verticalCenter: parent.verticalCenter
+                        iconText: root.gridMode ? root.glyphList : root.glyphGrid
+                        tooltipText: root.gridMode ? "List view" : "Grid view"
+                        foreground: root.foreground
+                        fontFamily: root.fontFamily
+                        onClicked: {
+                            if (!root.svc)
+                                return
+                            root.svc.gridMode = !root.svc.gridMode
+                            root.svc._savePrefs()
+                        }
+                    }
+                }
+
+                // Search gets its own full-width row: squeezed next
+                // to the crumbs it overlapped the listing below.
+                Item {
+                    visible: root.showContents
+                    width: parent.width
+                    height: searchField.height
+
+                    TextField {
+                        id: searchField
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        placeholderText: "Search the whole safe…"
+                        foreground: root.foreground
+                        font.family: root.fontFamily
+                        enabled: !!root.svc && !root.svc.busy
+                        // Room for the clear button when it shows.
+                        rightPadding: root.searchMode ? Style.space(28) : 0
+                        onTextChanged: root.searchQuery = text
+                        Keys.onEscapePressed: root.exitSearch()
+                    }
+
+                    PanelActionButton {
+                        anchors.right: parent.right
+                        anchors.rightMargin: Style.space(4)
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: root.searchMode
+                        iconText: root.glyphClose
+                        tooltipText: "Clear search"
+                        foreground: root.foreground
+                        fontFamily: root.fontFamily
+                        onClicked: {
+                            root.exitSearch()
+                            searchField.forceActiveFocus()
+                        }
+                    }
+                }
+
+                // Selection bar — the bulk actions for whatever is
+                // picked in select mode.
+                Row {
+                    visible: root.showContents && root.selectMode
+                             && root.selectedCount > 0
+                    width: parent.width
+                    spacing: Style.space(8)
+
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        width: parent.width - selectActions.implicitWidth - Style.space(16)
+                        text: root.selectedCount === 1
+                              ? "1 item selected"
+                              : root.selectedCount + " items selected"
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                    }
+
+                    Row {
+                        id: selectActions
+                        anchors.verticalCenter: parent.verticalCenter
+                        spacing: Style.space(4)
+
+                        Button {
+                            text: "Extract"
+                            foreground: root.foreground
+                            accent: Color.accent
+                            fontFamily: root.fontFamily
+                            enabled: !root.svc || !root.svc.busy
+                            onClicked: root.extractSelected()
+                        }
+
+                        Button {
+                            text: "Delete"
+                            foreground: root.foreground
+                            accent: Color.urgent
+                            fontFamily: root.fontFamily
+                            enabled: !root.svc || !root.svc.busy
+                            onClicked: root.deleteSelected()
+                        }
+                    }
+                }
+            }
+
             Flickable {
                 id: scroll
                 visible: !root.settingsOpen
-                anchors.fill: parent
+                anchors.top: fixedTop.bottom
+                anchors.bottom: fixedBottom.top
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.topMargin: Style.space(6)
+                anchors.bottomMargin: Style.space(6)
                 contentWidth: width
                 contentHeight: content.implicitHeight
                 clip: true
@@ -593,91 +875,6 @@ Panel {
                     id: content
                     width: scroll.width
                     spacing: Style.space(12)
-
-                    // Header -------------------------------------------------
-                    Item {
-                        width: parent.width
-                        height: Style.space(26)
-
-                        Text {
-                            anchors.left: parent.left
-                            anchors.verticalCenter: parent.verticalCenter
-                            width: parent.width * 0.55
-                            text: root.glyphShield + "  OmaSafe"
-                            textFormat: Text.PlainText
-                            elide: Text.ElideRight
-                            color: root.foreground
-                            font.family: root.fontFamily
-                            font.pixelSize: Style.font.subtitle
-                            font.bold: true
-                        }
-
-                        Row {
-                            anchors.right: parent.right
-                            anchors.verticalCenter: parent.verticalCenter
-                            spacing: Style.space(2)
-
-                            Text {
-                                anchors.verticalCenter: parent.verticalCenter
-                                visible: root.showContents
-                                width: Math.min(implicitWidth, Style.space(80))
-                                text: root.svc
-                                    ? (root.svc.itemCount === 1 ? "1 item" : root.svc.itemCount + " items")
-                                    : ""
-                                textFormat: Text.PlainText
-                                elide: Text.ElideRight
-                                color: Color.accent
-                                font.family: root.fontFamily
-                                font.pixelSize: Style.font.bodySmall
-                                rightPadding: Style.space(8)
-                            }
-
-                            PanelActionButton {
-                                visible: root.showContents
-                                iconText: root.glyphKey
-                                tooltipText: "Change password"
-                                foreground: root.foreground
-                                fontFamily: root.fontFamily
-                                onClicked: {
-                                    root.changeOld = ""
-                                    root.changeNew = ""
-                                    root.changeConfirm = ""
-                                    root.changeError = ""
-                                    root.changePwOpen = true
-                                }
-                            }
-
-                            PanelActionButton {
-                                visible: root.showContents
-                                iconText: root.glyphSettings
-                                tooltipText: root.settingsOpen ? "Back to the safe" : "Settings"
-                                foreground: root.foreground
-                                fontFamily: root.fontFamily
-                                onClicked: root.settingsOpen = !root.settingsOpen
-                            }
-
-                            PanelActionButton {
-                                visible: root.showContents
-                                iconText: root.glyphLock
-                                tooltipText: "Lock now"
-                                foreground: root.foreground
-                                fontFamily: root.fontFamily
-                                onClicked: {
-                                    if (root.svc)
-                                        root.svc.lock()
-                                    root.close()
-                                }
-                            }
-
-                            PanelActionButton {
-                                iconText: root.glyphClose
-                                tooltipText: "Close"
-                                foreground: root.foreground
-                                fontFamily: root.fontFamily
-                                onClicked: root.close()
-                            }
-                        }
-                    }
 
                     // Service missing — never expected, but the card must
                     // not render nonsense if it ever happens.
@@ -1171,188 +1368,6 @@ Panel {
                                             root.changePwOpen = true
                                         }
                                     }
-                                }
-                            }
-                        }
-
-                        // Toolbar: breadcrumbs on the left, layout toggle on
-                        // the right.
-                        Item {
-                            visible: root.showContents
-                            width: parent.width
-                            height: Style.space(26)
-
-                            Row {
-                                id: crumbs
-                                anchors.left: parent.left
-                                anchors.verticalCenter: parent.verticalCenter
-                                // Stay clear of the toolbar buttons; overflow
-                                // clips instead of sliding under them.
-                                width: parent.width - Style.space(110)
-                                clip: true
-                                spacing: Style.space(2)
-
-                                PanelActionButton {
-                                    visible: !!root.svc && root.svc.currentFolder !== "/"
-                                    iconText: root.glyphChevronLeft
-                                    tooltipText: "Up one folder"
-                                    foreground: root.foreground
-                                    fontFamily: root.fontFamily
-                                    onClicked: if (root.svc) {
-                                        root.exitSearch()
-                                        root.svc.navigate(SafeModel.parentOf(root.svc.currentFolder))
-                                    }
-                                }
-
-                                Repeater {
-                                    model: root.svc ? SafeModel.pathSegments(root.svc.currentFolder) : []
-
-                                    delegate: Text {
-                                        id: crumb
-                                        required property int index
-                                        required property var modelData
-
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        width: Math.min(implicitWidth, Style.space(90))
-                                        text: (index === 0 ? "" : " / ") + (modelData.name === "" ? "safe" : modelData.name)
-                                        textFormat: Text.PlainText
-                                        elide: Text.ElideMiddle
-                                        color: !!root.svc && modelData.path === root.svc.currentFolder
-                                               ? Color.accent : Qt.alpha(root.foreground, 0.6)
-                                        font.family: root.fontFamily
-                                        font.pixelSize: Style.font.bodySmall
-                                        font.bold: !!root.svc && modelData.path === root.svc.currentFolder
-
-                                        TapHandler {
-                                            onTapped: if (root.svc) {
-                                                root.exitSearch()
-                                                root.svc.navigate(crumb.modelData.path)
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-
-                            PanelActionButton {
-                                id: selectToggle
-                                anchors.right: sortToggle.left
-                                anchors.rightMargin: Style.space(4)
-                                anchors.verticalCenter: parent.verticalCenter
-                                iconText: root.selectMode ? root.glyphClose : root.glyphSelect
-                                tooltipText: root.selectMode ? "Stop selecting" : "Select items"
-                                foreground: root.foreground
-                                fontFamily: root.fontFamily
-                                onClicked: root.toggleSelectMode()
-                            }
-
-                            PanelActionButton {
-                                id: sortToggle
-                                anchors.right: layoutToggle.left
-                                anchors.rightMargin: Style.space(4)
-                                anchors.verticalCenter: parent.verticalCenter
-                                iconText: root.glyphSort
-                                tooltipText: "Sort: " + root.sortLabels[root.sortMode] + " — click to change"
-                                foreground: root.foreground
-                                fontFamily: root.fontFamily
-                                onClicked: root.cycleSort()
-                            }
-
-                            PanelActionButton {
-                                id: layoutToggle
-                                anchors.right: parent.right
-                                anchors.verticalCenter: parent.verticalCenter
-                                iconText: root.gridMode ? root.glyphList : root.glyphGrid
-                                tooltipText: root.gridMode ? "List view" : "Grid view"
-                                foreground: root.foreground
-                                fontFamily: root.fontFamily
-                                onClicked: {
-                                    if (!root.svc)
-                                        return
-                                    root.svc.gridMode = !root.svc.gridMode
-                                    root.svc._savePrefs()
-                                }
-                            }
-                        }
-
-                        // Search gets its own full-width row: squeezed next
-                        // to the crumbs it overlapped the listing below.
-                        Item {
-                            visible: root.showContents
-                            width: parent.width
-                            height: searchField.height
-
-                            TextField {
-                                id: searchField
-                                anchors.left: parent.left
-                                anchors.right: parent.right
-                                placeholderText: "Search the whole safe…"
-                                foreground: root.foreground
-                                font.family: root.fontFamily
-                                enabled: !!root.svc && !root.svc.busy
-                                // Room for the clear button when it shows.
-                                rightPadding: root.searchMode ? Style.space(28) : 0
-                                onTextChanged: root.searchQuery = text
-                                Keys.onEscapePressed: root.exitSearch()
-                            }
-
-                            PanelActionButton {
-                                anchors.right: parent.right
-                                anchors.rightMargin: Style.space(4)
-                                anchors.verticalCenter: parent.verticalCenter
-                                visible: root.searchMode
-                                iconText: root.glyphClose
-                                tooltipText: "Clear search"
-                                foreground: root.foreground
-                                fontFamily: root.fontFamily
-                                onClicked: {
-                                    root.exitSearch()
-                                    searchField.forceActiveFocus()
-                                }
-                            }
-                        }
-
-                        // Selection bar — the bulk actions for whatever is
-                        // picked in select mode.
-                        Row {
-                            visible: root.showContents && root.selectMode
-                                     && root.selectedCount > 0
-                            width: parent.width
-                            spacing: Style.space(8)
-
-                            Text {
-                                anchors.verticalCenter: parent.verticalCenter
-                                width: parent.width - selectActions.implicitWidth - Style.space(16)
-                                text: root.selectedCount === 1
-                                      ? "1 item selected"
-                                      : root.selectedCount + " items selected"
-                                textFormat: Text.PlainText
-                                elide: Text.ElideRight
-                                color: root.foreground
-                                font.family: root.fontFamily
-                                font.pixelSize: Style.font.bodySmall
-                            }
-
-                            Row {
-                                id: selectActions
-                                anchors.verticalCenter: parent.verticalCenter
-                                spacing: Style.space(4)
-
-                                Button {
-                                    text: "Extract"
-                                    foreground: root.foreground
-                                    accent: Color.accent
-                                    fontFamily: root.fontFamily
-                                    enabled: !root.svc || !root.svc.busy
-                                    onClicked: root.extractSelected()
-                                }
-
-                                Button {
-                                    text: "Delete"
-                                    foreground: root.foreground
-                                    accent: Color.urgent
-                                    fontFamily: root.fontFamily
-                                    enabled: !root.svc || !root.svc.busy
-                                    onClicked: root.deleteSelected()
                                 }
                             }
                         }
@@ -2075,48 +2090,58 @@ Panel {
                         }
                     }
 
-                    // Footer -------------------------------------------------------
-                    Column {
+                }
+            }
+
+            // Fixed bottom: busy label and hints.
+            Column {
+                id: fixedBottom
+                anchors.bottom: parent.bottom
+                anchors.left: parent.left
+                anchors.right: parent.right
+                spacing: Style.space(4)
+
+                // Footer -------------------------------------------------------
+                Column {
+                    width: parent.width
+                    spacing: Style.space(4)
+
+                    Item {
+                        width: 1
+                        height: Style.space(2)
+                    }
+
+                    Text {
+                        visible: !!root.svc && root.svc.busy
                         width: parent.width
-                        spacing: Style.space(4)
+                        text: root.svc ? root.svc.busyLabel : ""
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        color: Color.accent
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                    }
 
-                        Item {
-                            width: 1
-                            height: Style.space(2)
-                        }
+                    Text {
+                        visible: !!root.svc && !root.svc.busy && root.showContents
+                        width: parent.width
+                        text: "Click folders to browse, drop onto one to add inside. Press an item and drag it into any window to take a copy out."
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        color: Qt.alpha(root.foreground, 0.4)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                    }
 
-                        Text {
-                            visible: !!root.svc && root.svc.busy
-                            width: parent.width
-                            text: root.svc ? root.svc.busyLabel : ""
-                            textFormat: Text.PlainText
-                            elide: Text.ElideRight
-                            color: Color.accent
-                            font.family: root.fontFamily
-                            font.pixelSize: Style.font.caption
-                        }
-
-                        Text {
-                            visible: !!root.svc && !root.svc.busy && root.showContents
-                            width: parent.width
-                            text: "Click folders to browse, drop onto one to add inside. Press an item and drag it into any window to take a copy out."
-                            textFormat: Text.PlainText
-                            elide: Text.ElideRight
-                            color: Qt.alpha(root.foreground, 0.4)
-                            font.family: root.fontFamily
-                            font.pixelSize: Style.font.caption
-                        }
-
-                        Text {
-                            visible: !!root.svc && !root.svc.busy && root.showUnlock
-                            width: parent.width
-                            text: "Drops while locked are refused — unlock first."
-                            textFormat: Text.PlainText
-                            elide: Text.ElideRight
-                            color: Qt.alpha(root.foreground, 0.4)
-                            font.family: root.fontFamily
-                            font.pixelSize: Style.font.caption
-                        }
+                    Text {
+                        visible: !!root.svc && !root.svc.busy && root.showUnlock
+                        width: parent.width
+                        text: "Drops while locked are refused — unlock first."
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        color: Qt.alpha(root.foreground, 0.4)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
                     }
                 }
             }
