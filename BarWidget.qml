@@ -82,7 +82,9 @@ Panel {
     // An optional action inside the toast pill (the delete Undo).
     property string toastActionText: ""
     property var toastActionFn: null
-    property bool gridMode: false
+    // View state lives on the service so it persists in the prefs file; the
+    // widget only reads it here and writes it through the toggles.
+    readonly property bool gridMode: !!root.svc && root.svc.gridMode
     // Search: filters the whole vault by base name, independent of the open
     // folder. Cleared by Escape, any navigation, revealing a result, or the
     // card closing or locking.
@@ -98,14 +100,19 @@ Panel {
         root.searchMode ? root.searchResults.items
                         : (root.svc ? root.svc.visibleItems : []),
         root.sortMode)
-    // Listing sort: 0 = name, 1 = newest first, 2 = largest. Session-only;
-    // the settings view will persist it later.
-    property int sortMode: 0
+    // Listing sort: 0 = name, 1 = newest first, 2 = largest. Persisted on
+    // the service; the toolbar button cycles it.
+    readonly property int sortMode: root.svc ? root.svc.sortMode : 0
     readonly property var sortLabels: ["name", "newest first", "largest first"]
+    // Grid image thumbnails, per the preferences toggle.
+    readonly property bool showThumbnails: !root.svc || root.svc.showThumbnails
 
     function cycleSort() {
-        root.sortMode = (root.sortMode + 1) % 3
-        root.showToast("Sorted by " + root.sortLabels[root.sortMode])
+        if (!root.svc)
+            return
+        root.svc.sortMode = (root.svc.sortMode + 1) % 3
+        root.svc._savePrefs()
+        root.showToast("Sorted by " + root.sortLabels[root.svc.sortMode])
     }
     // A revealed file flashes its row for a moment after the jump.
     property string flashPath: ""
@@ -1240,7 +1247,12 @@ Panel {
                                 tooltipText: root.gridMode ? "List view" : "Grid view"
                                 foreground: root.foreground
                                 fontFamily: root.fontFamily
-                                onClicked: root.gridMode = !root.gridMode
+                                onClicked: {
+                                    if (!root.svc)
+                                        return
+                                    root.svc.gridMode = !root.svc.gridMode
+                                    root.svc._savePrefs()
+                                }
                             }
                         }
 
@@ -1362,7 +1374,7 @@ Panel {
                                 // thumbnail): decrypted on hover or press.
                                 readonly property string stagePath: !!root.svc && root.svc.staged && root.svc.staged[modelData.path]
                                     ? String(root.svc.staged[modelData.path].path) : ""
-                                readonly property url thumbUrl: rowDelegate.stagePath !== "" && SafeModel.isImage(rowDelegate.name)
+                                readonly property url thumbUrl: root.showThumbnails && rowDelegate.stagePath !== "" && SafeModel.isImage(rowDelegate.name)
                                     ? SafeModel.urlFromPath(rowDelegate.stagePath) : ""
                                 // Highlight while a dragged payload hovers a
                                 // folder: that drop lands inside it.
@@ -1684,7 +1696,7 @@ Panel {
                                     readonly property string parentDir: SafeModel.dirname(modelData.path)
                                     readonly property string stagePath: !!root.svc && root.svc.staged && root.svc.staged[modelData.path]
                                         ? String(root.svc.staged[modelData.path].path) : ""
-                                    readonly property url thumbUrl: tileDelegate.stagePath !== "" && SafeModel.isImage(tileDelegate.name)
+                                    readonly property url thumbUrl: root.showThumbnails && tileDelegate.stagePath !== "" && SafeModel.isImage(tileDelegate.name)
                                         ? SafeModel.urlFromPath(tileDelegate.stagePath) : ""
                                     property bool folderHover: false
 
@@ -2099,6 +2111,22 @@ Panel {
                                 if (!root.svc)
                                     return
                                 root.svc.idleLockMinutes = root.svc.idleLockMinutes > 0 ? 0 : 10
+                                root.svc._savePrefs()
+                            }
+                        }
+
+                        Toggle {
+                            width: parent.width
+                            label: "Grid thumbnails"
+                            description: "Image tiles and list rows show a decrypted preview thumbnail. The preview lightbox is unaffected."
+                            checked: !!root.svc && root.svc.showThumbnails
+                            foreground: root.foreground
+                            accent: Color.accent
+                            fontFamily: root.fontFamily
+                            onClicked: {
+                                if (!root.svc)
+                                    return
+                                root.svc.showThumbnails = !root.svc.showThumbnails
                                 root.svc._savePrefs()
                             }
                         }

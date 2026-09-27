@@ -109,6 +109,11 @@ Item {
     // Idle auto-lock, minutes of no input before the safe locks itself.
     // 0 = off (opt-in from the card's preferences); capped at 4 hours.
     property int idleLockMinutes: 0
+    // Content view defaults, persisted with the rest of the preferences:
+    // listing sort (0 name / 1 newest / 2 largest), grid-vs-list, thumbnails.
+    property int sortMode: 0
+    property bool gridMode: false
+    property bool showThumbnails: true
     // Set once the authenticated-format migration pass has swept the vault
     // and found nothing legacy — every write has been tagged since 0.6.0, so
     // a clean pass means the pass never needs to run again.
@@ -459,6 +464,9 @@ Item {
                     root.deleteOriginals = prefs.deleteOriginals
                 root.autoLockSeconds = SafeModel.clampInt(prefs.autoLockSeconds, 15, 0, 3600)
                 root.idleLockMinutes = SafeModel.clampInt(prefs.idleLockMinutes, 0, 0, 240)
+                root.sortMode = SafeModel.clampInt(prefs.sortMode, 0, 0, 2)
+                root.gridMode = prefs.gridMode === true
+                root.showThumbnails = prefs.showThumbnails !== false
                 if (typeof prefs.cryptoMigrated === "boolean")
                     root.cryptoMigrated = prefs.cryptoMigrated
             } catch (e) {
@@ -473,6 +481,9 @@ Item {
             deleteOriginals: root.deleteOriginals,
             autoLockSeconds: root.autoLockSeconds,
             idleLockMinutes: root.idleLockMinutes,
+            sortMode: root.sortMode,
+            gridMode: root.gridMode,
+            showThumbnails: root.showThumbnails,
             cryptoMigrated: root.cryptoMigrated
         }))
     }
