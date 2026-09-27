@@ -2086,6 +2086,22 @@ Panel {
                                 root.svc._savePrefs()
                             }
                         }
+
+                        Toggle {
+                            width: parent.width
+                            label: "Auto-lock when idle"
+                            description: "The safe locks itself after 10 minutes of no keyboard or mouse activity, wherever the focus is. A running job waits for it to finish."
+                            checked: !!root.svc && root.svc.idleLockMinutes > 0
+                            foreground: root.foreground
+                            accent: Color.accent
+                            fontFamily: root.fontFamily
+                            onClicked: {
+                                if (!root.svc)
+                                    return
+                                root.svc.idleLockMinutes = root.svc.idleLockMinutes > 0 ? 0 : 10
+                                root.svc._savePrefs()
+                            }
+                        }
                     }
 
                     // Footer -------------------------------------------------------

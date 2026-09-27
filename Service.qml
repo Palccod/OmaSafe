@@ -3,6 +3,8 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Wayland
+import Quickshell.Wayland._IdleNotify
 import "SafeModel.js" as SafeModel
 import "bridge" as OmaSafeBridge
 
@@ -104,6 +106,9 @@ Item {
     // Seconds to stay unlocked after the popout closes; 0 keeps the session
     // until the shell restarts or the user locks manually.
     property int autoLockSeconds: 15
+    // Idle auto-lock, minutes of no input before the safe locks itself.
+    // 0 = off (opt-in from the card's preferences); capped at 4 hours.
+    property int idleLockMinutes: 0
     // Set once the authenticated-format migration pass has swept the vault
     // and found nothing legacy — every write has been tagged since 0.6.0, so
     // a clean pass means the pass never needs to run again.
@@ -453,6 +458,7 @@ Item {
                 if (typeof prefs.deleteOriginals === "boolean")
                     root.deleteOriginals = prefs.deleteOriginals
                 root.autoLockSeconds = SafeModel.clampInt(prefs.autoLockSeconds, 15, 0, 3600)
+                root.idleLockMinutes = SafeModel.clampInt(prefs.idleLockMinutes, 0, 0, 240)
                 if (typeof prefs.cryptoMigrated === "boolean")
                     root.cryptoMigrated = prefs.cryptoMigrated
             } catch (e) {
@@ -466,6 +472,7 @@ Item {
         prefsFile.setText(JSON.stringify({
             deleteOriginals: root.deleteOriginals,
             autoLockSeconds: root.autoLockSeconds,
+            idleLockMinutes: root.idleLockMinutes,
             cryptoMigrated: root.cryptoMigrated
         }))
     }
@@ -2230,6 +2237,20 @@ Item {
                     argv.push(root.vaultDir + "/" + it.id)
         if (argv.length > 2)
             _enqueue(argv, {}, function (code, out) { })
+    }
+
+    // Idle auto-lock: after idleLockMinutes of no input the safe locks
+    // itself, wherever the focus is. The watch only runs while the safe is
+    // unlocked and idle — a running job disables it, so a long extract or
+    // stash is never interrupted and the countdown restarts after it.
+    IdleMonitor {
+        enabled: root.phase === "unlocked" && root.idleLockMinutes > 0 && !root.busy
+        timeout: root.idleLockMinutes * 60
+        respectInhibitors: true
+        onIsIdleChanged: {
+            if (isIdle && root.phase === "unlocked" && !root.busy)
+                root.lock()
+        }
     }
 
     Timer {
