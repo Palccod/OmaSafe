@@ -212,12 +212,66 @@ Panel {
                              })
     }
 
-    function extractSelected() {
-        if (!root.svc)
+    // Group drag: in select mode, dragging a picked item carries the whole
+    // selection. The picked items stage one by one (each is a decrypt job,
+    // folders the most work); the drag starts from the initiating row once
+    // the last staged copy lands. Dragging an unpicked item stays single.
+    property bool groupDragPending: false
+    property var groupDragPaths: []
+    property var groupDragItem: null
+    property string groupDragPath: ""
+
+    function dragMimeDataFor(path, stagePath) {
+        if (stagePath === "")
+            return {}
+        return {
+            "text/uri-list": SafeModel.uriList([stagePath]),
+            "text/plain": stagePath
+        }
+    }
+
+    // Returns true when the drag is now owned by the group machinery (either
+    // started, or waiting for the remaining decrypts) — the caller skips its
+    // single-item drag in that case.
+    function beginGroupDrag(item, path) {
+        if (!root.selectMode || !root.isSelected(path))
+            return false
+        root.groupDragPending = true
+        root.groupDragItem = item
+        root.groupDragPath = String(path)
+        root.groupDragPaths = root.selectedPaths.slice()
+        for (const p of root.groupDragPaths)
+            root.svc.stageItem(p)
+        const uris = []
+        for (const p of root.groupDragPaths) {
+            const st = root.svc.staged ? root.svc.staged[p] : null
+            if (!st)
+                return true
+            uris.push(st.path)
+        }
+        root.startGroupDrag(uris)
+        return true
+    }
+
+    function startGroupDrag(uris) {
+        const item = root.groupDragItem
+        root.groupDragPending = false
+        root.groupDragItem = null
+        if (!item || !uris.length)
             return
-        for (const p of root.selectedPaths)
-            root.svc.extractAt(p)
-        root.selectedPaths = []
+        root.dragOutActive = true
+        item.Drag.mimeData = {
+            "text/uri-list": SafeModel.uriList(uris),
+            "text/plain": uris.join("\n")
+        }
+        item.Drag.active = true
+        item.Drag.startDrag(Qt.CopyAction)
+        if (item.Drag.active)
+            item.Drag.active = false
+        // Hand the row back its own single-item payload — the imperative
+        // assignment above replaced its declarative one.
+        item.Drag.mimeData = root.dragMimeDataFor(root.groupDragPath, item.stagePath)
+        root.dragOutActive = false
     }
 
     function exitSearch() {
@@ -242,6 +296,20 @@ Panel {
         target: root.svc
         function onToast(message) {
             root.showToast(String(message))
+        }
+        // A group drag waits for the picked items to finish staging; the
+        // last staged copy is what lets it start.
+        function onStagedChanged() {
+            if (!root.groupDragPending)
+                return
+            const uris = []
+            for (const p of root.groupDragPaths) {
+                const st = root.svc.staged ? root.svc.staged[p] : null
+                if (!st)
+                    return
+                uris.push(st.path)
+            }
+            root.startGroupDrag(uris)
         }
         function onPhaseChanged() {
             root.unlockText = ""
@@ -835,15 +903,6 @@ Panel {
                         id: selectActions
                         anchors.verticalCenter: parent.verticalCenter
                         spacing: Style.space(4)
-
-                        Button {
-                            text: "Extract"
-                            foreground: root.foreground
-                            accent: Color.accent
-                            fontFamily: root.fontFamily
-                            enabled: !root.svc || !root.svc.busy
-                            onClicked: root.extractSelected()
-                        }
 
                         Button {
                             text: "Delete"
@@ -1465,10 +1524,7 @@ Panel {
                                 Drag.dragType: Drag.Automatic
                                 Drag.supportedActions: Qt.CopyAction
                                 Drag.proposedAction: Qt.CopyAction
-                                Drag.mimeData: rowDelegate.stagePath !== ""
-                                    ? ({ "text/uri-list": SafeModel.uriList([rowDelegate.stagePath]),
-                                         "text/plain": rowDelegate.stagePath })
-                                    : ({})
+                                Drag.mimeData: root.dragMimeDataFor(rowDelegate.modelData.path, rowDelegate.stagePath)
                                 Drag.imageSource: rowDelegate.dragImage
 
                                 property url dragImage: ""
@@ -1480,6 +1536,11 @@ Panel {
                                 }
 
                                 function beginDrag() {
+                                    // In select mode a picked item drags the
+                                    // whole selection (staged asynchronously;
+                                    // the service's stagedChanged finishes it).
+                                    if (root.beginGroupDrag(rowDelegate, rowDelegate.modelData.path))
+                                        return
                                     if (rowDelegate.stagePath === "")
                                         return
                                     console.log("omasafe: drag out", rowDelegate.name)
@@ -1777,10 +1838,7 @@ Panel {
                                     Drag.dragType: Drag.Automatic
                                     Drag.supportedActions: Qt.CopyAction
                                     Drag.proposedAction: Qt.CopyAction
-                                    Drag.mimeData: tileDelegate.stagePath !== ""
-                                        ? ({ "text/uri-list": SafeModel.uriList([tileDelegate.stagePath]),
-                                             "text/plain": tileDelegate.stagePath })
-                                        : ({})
+                                    Drag.mimeData: root.dragMimeDataFor(tileDelegate.modelData.path, tileDelegate.stagePath)
                                     Drag.imageSource: tileDelegate.dragImage
 
                                     property url dragImage: ""
@@ -1792,6 +1850,8 @@ Panel {
                                     }
 
                                     function beginDrag() {
+                                        if (root.beginGroupDrag(tileDelegate, tileDelegate.modelData.path))
+                                            return
                                         if (tileDelegate.stagePath === "")
                                             return
                                         root.dragOutActive = true
