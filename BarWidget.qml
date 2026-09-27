@@ -2097,6 +2097,7 @@ Panel {
             // Fixed bottom: busy label and hints.
             Column {
                 id: fixedBottom
+                visible: !root.settingsOpen
                 anchors.bottom: parent.bottom
                 anchors.left: parent.left
                 anchors.right: parent.right
