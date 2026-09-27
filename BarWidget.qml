@@ -57,6 +57,7 @@ Panel {
     readonly property string glyphGrid: "\u{F0570}"          // nf-md-view-grid
     readonly property string glyphList: "\u{F0572}"          // nf-md-view-list
     readonly property string glyphSearch: "\u{F0349}"        // nf-md-magnify
+    readonly property string glyphSelect: "\u{F0132}"        // nf-md-checkbox-multiple-marked
 
     // Which card to show is derived state — the service is the only source
     // of truth, so a lock from IPC or the timer lands the card back on the
@@ -76,8 +77,9 @@ Panel {
     property bool cardDropActive: false
     property bool barDropActive: false
     property string toastText: ""
-    property bool deleteConfirmOpen: false
-    property string deletePath: ""
+    // An optional action inside the toast pill (the delete Undo).
+    property string toastActionText: ""
+    property var toastActionFn: null
     property bool gridMode: false
     // Search: filters the whole vault by base name, independent of the open
     // folder. Cleared by Escape, any navigation, revealing a result, or the
@@ -108,7 +110,92 @@ Panel {
 
     function showToast(text) {
         root.toastText = text
+        root.toastActionText = ""
+        root.toastActionFn = null
+        toastTimer.interval = 2400
         toastTimer.restart()
+    }
+
+    // Widget-raised toast with an action — the delete Undo. Outlives the
+    // service's passive messages, and its lifetime mirrors the trash grace
+    // window on the service side.
+    function showActionToast(text, actionText, fn) {
+        root.toastText = text
+        root.toastActionText = actionText
+        root.toastActionFn = fn
+        toastTimer.interval = 7000
+        toastTimer.restart()
+    }
+
+    // The trash is undoable for a few seconds; the toast carries the Undo.
+    function requestDelete(path) {
+        const p = String(path || "")
+        if (!root.svc || p === "")
+            return
+        const id = root.svc.trashMany([p])
+        if (id === "")
+            return
+        root.showActionToast("Deleted " + SafeModel.baseNameOf(p), "Undo",
+                             function () {
+                                 if (!root.svc)
+                                     return
+                                 if (root.svc.undoTrash(id))
+                                     root.showToast("Restored " + SafeModel.baseNameOf(p))
+                                 else
+                                     root.showToast("Too late — " + SafeModel.baseNameOf(p) + " is gone for good")
+                             })
+    }
+
+    // Select mode: clicks toggle selection instead of opening; a bar offers
+    // the bulk actions on everything chosen.
+    property bool selectMode: false
+    property var selectedPaths: []
+    readonly property int selectedCount: root.selectedPaths.length
+
+    function isSelected(path) {
+        return root.selectedPaths.indexOf(String(path)) !== -1
+    }
+
+    function toggleSelectMode() {
+        root.selectMode = !root.selectMode
+        root.selectedPaths = []
+    }
+
+    function toggleSelected(path) {
+        const p = String(path || "")
+        root.selectedPaths = root.isSelected(p)
+            ? root.selectedPaths.filter(x => x !== p)
+            : root.selectedPaths.concat([p])
+    }
+
+    function deleteSelected() {
+        if (!root.svc || !root.selectedPaths.length)
+            return
+        const paths = root.selectedPaths.slice()
+        const names = paths.length === 1
+            ? SafeModel.baseNameOf(paths[0])
+            : paths.length + " items"
+        const id = root.svc.trashMany(paths)
+        root.selectedPaths = []
+        if (id === "")
+            return
+        root.showActionToast("Deleted " + names, "Undo",
+                             function () {
+                                 if (!root.svc)
+                                     return
+                                 if (root.svc.undoTrash(id))
+                                     root.showToast("Restored " + names)
+                                 else
+                                     root.showToast("Too late — already gone for good")
+                             })
+    }
+
+    function extractSelected() {
+        if (!root.svc)
+            return
+        for (const p of root.selectedPaths)
+            root.svc.extractAt(p)
+        root.selectedPaths = []
     }
 
     function exitSearch() {
@@ -139,13 +226,14 @@ Panel {
             root.setupPass = ""
             root.setupConfirm = ""
             root.setupError = ""
-            root.deleteConfirmOpen = false
             root.changePwOpen = false
             root.changeOld = ""
             root.changeNew = ""
             root.changeConfirm = ""
             root.changeError = ""
             root.exitSearch()
+            root.selectMode = false
+            root.selectedPaths = []
             // A locked safe can offer keyring recovery — check whether the
             // dedicated keyring exists before the unlock card shows.
             if (root.svc && root.svc.phase === "locked")
@@ -243,11 +331,6 @@ Panel {
             return
         root.svc.copyBackupKey()
         root.showToast("Back-up key copied")
-    }
-
-    function requestDelete(path) {
-        root.deletePath = String(path || "")
-        root.deleteConfirmOpen = true
     }
 
     // --- bar button -----------------------------------------------------------
@@ -368,8 +451,13 @@ Panel {
             id: keyCatcher
             anchors.fill: parent
             onCloseRequested: {
-                if (root.deleteConfirmOpen) {
-                    root.deleteConfirmOpen = false
+                // ESC peels the selection state back before it closes the
+                // window: picks first, then select mode, then the card.
+                if (root.selectMode) {
+                    if (root.selectedCount > 0)
+                        root.selectedPaths = []
+                    else
+                        root.selectMode = false
                     return
                 }
                 root.close()
@@ -1059,6 +1147,18 @@ Panel {
                             }
 
                             PanelActionButton {
+                                id: selectToggle
+                                anchors.right: layoutToggle.left
+                                anchors.rightMargin: Style.space(4)
+                                anchors.verticalCenter: parent.verticalCenter
+                                iconText: root.selectMode ? root.glyphClose : root.glyphSelect
+                                tooltipText: root.selectMode ? "Stop selecting" : "Select items"
+                                foreground: root.foreground
+                                fontFamily: root.fontFamily
+                                onClicked: root.toggleSelectMode()
+                            }
+
+                            PanelActionButton {
                                 id: layoutToggle
                                 anchors.right: parent.right
                                 anchors.verticalCenter: parent.verticalCenter
@@ -1103,6 +1203,52 @@ Panel {
                                 onClicked: {
                                     root.exitSearch()
                                     searchField.forceActiveFocus()
+                                }
+                            }
+                        }
+
+                        // Selection bar — the bulk actions for whatever is
+                        // picked in select mode.
+                        Row {
+                            visible: root.showContents && root.selectMode
+                                     && root.selectedCount > 0
+                            width: parent.width
+                            spacing: Style.space(8)
+
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                width: parent.width - selectActions.implicitWidth - Style.space(16)
+                                text: root.selectedCount === 1
+                                      ? "1 item selected"
+                                      : root.selectedCount + " items selected"
+                                textFormat: Text.PlainText
+                                elide: Text.ElideRight
+                                color: root.foreground
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.bodySmall
+                            }
+
+                            Row {
+                                id: selectActions
+                                anchors.verticalCenter: parent.verticalCenter
+                                spacing: Style.space(4)
+
+                                Button {
+                                    text: "Extract"
+                                    foreground: root.foreground
+                                    accent: Color.accent
+                                    fontFamily: root.fontFamily
+                                    enabled: !root.svc || !root.svc.busy
+                                    onClicked: root.extractSelected()
+                                }
+
+                                Button {
+                                    text: "Delete"
+                                    foreground: root.foreground
+                                    accent: Color.urgent
+                                    fontFamily: root.fontFamily
+                                    enabled: !root.svc || !root.svc.busy
+                                    onClicked: root.deleteSelected()
                                 }
                             }
                         }
@@ -1154,7 +1300,7 @@ Panel {
                                 color: rowDelegate.modelData.path === root.flashPath ? Qt.alpha(Color.accent, 0.22)
                                     : rowDelegate.folderHover || rowHover.hovered ? Qt.alpha(root.foreground, 0.07) : Qt.alpha(root.foreground, 0.035)
                                 border.width: 1
-                                border.color: rowDelegate.folderHover
+                                border.color: root.isSelected(modelData.path) || rowDelegate.folderHover
                                     ? Color.accent
                                     : (rowHover.hovered ? Qt.alpha(Color.accent, 0.55) : "transparent")
 
@@ -1287,9 +1433,14 @@ Panel {
                                         // the buttons. A completed drag
                                         // attempt must not also navigate.
                                         // In search mode a click reveals the
-                                        // hit at its real location instead.
+                                        // hit at its real location; in select
+                                        // mode it toggles the pick instead.
                                         if (dragging || !root.svc)
                                             return
+                                        if (root.selectMode) {
+                                            root.toggleSelected(rowDelegate.modelData.path)
+                                            return
+                                        }
                                         if (root.searchMode) {
                                             root.revealItem(rowDelegate.modelData.path, rowDelegate.isFolder)
                                             return
@@ -1412,7 +1563,7 @@ Panel {
                                     PanelActionButton {
                                         anchors.verticalCenter: parent.verticalCenter
                                         iconText: root.glyphTrash
-                                        tooltipText: "Destroy (encrypted copy is gone for good)"
+                                        tooltipText: "Delete — undoable for a few seconds"
                                         foreground: root.foreground
                                         hoverColor: Color.urgent
                                         fontFamily: root.fontFamily
@@ -1465,7 +1616,7 @@ Panel {
                                     color: tileDelegate.modelData.path === root.flashPath ? Qt.alpha(Color.accent, 0.22)
                                         : tileDelegate.folderHover || tileHover.hovered ? Qt.alpha(root.foreground, 0.07) : Qt.alpha(root.foreground, 0.035)
                                     border.width: 1
-                                    border.color: tileDelegate.folderHover
+                                    border.color: root.isSelected(modelData.path) || tileDelegate.folderHover
                                         ? Color.accent
                                         : (tileHover.hovered ? Qt.alpha(Color.accent, 0.55) : "transparent")
 
@@ -1574,10 +1725,16 @@ Panel {
                                         }
 
                                         onClicked: mouse => {
-                                            // In search mode a click reveals
-                                            // the hit at its real location.
+                                            // In select mode a click toggles
+                                            // the pick; in search mode it
+                                            // reveals the hit at its real
+                                            // location.
                                             if (dragging || !root.svc)
                                                 return
+                                            if (root.selectMode) {
+                                                root.toggleSelected(tileDelegate.modelData.path)
+                                                return
+                                            }
                                             if (root.searchMode) {
                                                 root.revealItem(tileDelegate.modelData.path, tileDelegate.isFolder)
                                                 return
@@ -1682,7 +1839,7 @@ Panel {
 
                                         PanelActionButton {
                                             iconText: root.glyphTrash
-                                            tooltipText: "Destroy (encrypted copy is gone for good)"
+                                            tooltipText: "Delete — undoable for a few seconds"
                                             foreground: root.foreground
                                             hoverColor: Color.urgent
                                             fontFamily: root.fontFamily
@@ -1895,46 +2052,14 @@ Panel {
                 }
             }
 
-            // Destroy confirmation. Anchored over the whole card, like the
-            // clipboard history's.
-            ConfirmDialog {
-                anchors.fill: parent
-                z: 10
-                opened: root.deleteConfirmOpen
-                message: {
-                    if (!root.svc || root.deletePath === "")
-                        return ""
-                    const it = (root.svc.items || []).find(e => e.path === root.deletePath)
-                    if (!it)
-                        return ""
-                    const name = SafeModel.baseNameOf(it.path)
-                    if (it.isDir && it.legacy !== true) {
-                        const kids = (root.svc.items || []).filter(
-                            e => SafeModel.isUnder(e.path, it.path) && !e.isDir).length
-                        return kids > 0
-                            ? "Destroy " + name + " and the " + kids + (kids === 1 ? " file" : " files")
-                              + " inside it? The encrypted copies are erased for good."
-                            : "Destroy " + name + "? The encrypted copy is erased for good."
-                    }
-                    return "Destroy " + name + "? The encrypted copy is erased for good."
-                }
-                confirmText: "Destroy"
-                background: Color.background
-                foreground: root.foreground
-                fontFamily: root.fontFamily
-                onCanceled: root.deleteConfirmOpen = false
-                onConfirmed: {
-                    if (root.svc && root.deletePath !== "")
-                        root.svc.deleteAt(root.deletePath)
-                    root.deleteConfirmOpen = false
-                }
-            }
-
             // Toast -------------------------------------------------------------
+            // A passive pill for service messages; carries an action button
+            // when the widget raises it with one (the delete Undo).
             Rectangle {
+                id: toastPill
                 anchors.horizontalCenter: parent.horizontalCenter
                 anchors.bottom: parent.bottom
-                width: Math.min(parent.width, toastLabel.implicitWidth + Style.space(20))
+                width: Math.min(parent.width, toastRow.implicitWidth + Style.space(20))
                 height: toastLabel.implicitHeight + Style.space(12)
                 radius: height / 2
                 color: Color.accent
@@ -1946,16 +2071,42 @@ Panel {
                     NumberAnimation { duration: 140 }
                 }
 
-                Text {
-                    id: toastLabel
+                Row {
+                    id: toastRow
                     anchors.centerIn: parent
-                    text: root.toastText
-                    textFormat: Text.PlainText
-                    elide: Text.ElideRight
-                    width: Math.min(implicitWidth, parent.width - Style.space(16))
-                    color: Color.background
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.bodySmall
+                    spacing: Style.space(10)
+
+                    Text {
+                        id: toastLabel
+                        anchors.verticalCenter: parent.verticalCenter
+                        text: root.toastText
+                        textFormat: Text.PlainText
+                        elide: Text.ElideRight
+                        // Capped by the card, not the Row — the Row sizes
+                        // itself from this label and must not loop back.
+                        width: Math.min(implicitWidth, toastPill.parent.width - Style.space(60))
+                        color: Color.background
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                    }
+
+                    Text {
+                        anchors.verticalCenter: parent.verticalCenter
+                        visible: root.toastActionText !== ""
+                        text: root.toastActionText
+                        textFormat: Text.PlainText
+                        color: Color.background
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                        font.bold: true
+                        font.underline: actionHover.hovered
+
+                        HoverHandler { id: actionHover }
+
+                        TapHandler {
+                            onTapped: if (root.toastActionFn) root.toastActionFn()
+                        }
+                    }
                 }
             }
         }

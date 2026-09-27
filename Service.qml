@@ -2127,60 +2127,117 @@ Item {
         })
     }
 
-    // --- deletion / password ---------------------------------------------------
+    // --- deletion (undoable) ----------------------------------------------------
+    //
+    // A trash request removes the subtree from the index right away — the
+    // listing and every search reflect it instantly — but the blobs stay on
+    // disk for a short grace window while the card offers Undo. Undo
+    // re-inserts the exact same entries, so the same blob ids come back and
+    // nothing is re-encrypted. When the window expires the orphaned blobs are
+    // erased for good. A lock flushes the window early (erasing is the
+    // user's stated intent, and undo is impossible without the session
+    // anyway); a shell restart with a pending window leaves orphaned blobs
+    // behind — opaque-id files, invisible to the listing, reclaimed never.
 
-    function deleteAt(path) {
-        if (root.phase !== "unlocked")
-            return
-        const item = (root.items || []).find(it => it.path === path)
-        if (!item)
-            return
-        const name = SafeModel.baseNameOf(item.path)
-        root.busyLabel = "Destroying " + name + "…"
-        const gen = root._generation
-        if (item.isDir && !item.legacy) {
-            // Every file under the folder has its own blob; erase them all
-            // in one job, then drop the entries.
-            const ids = []
-            for (const it of root.items)
-                if (!it.isDir && SafeModel.isUnder(it.path, item.path))
-                    ids.push(it.id)
-            const argv = ["rm", "-f", "--"]
-            for (const id of ids)
-                argv.push(root.vaultDir + "/" + id)
-            _enqueue(argv, {}, (code, out) => {
-                if (root._stale(gen)) {
-                    root.busyLabel = ""
-                    root._emitToast("The safe locked before " + name + " was destroyed — it is still in the safe")
-                    return
-                }
-                _deleteEntries(item, name, gen)
-            })
-            return
-        }
-        _enqueue(["rm", "-f", "--", root.vaultDir + "/" + item.id], {}, (code, out) => {
-            if (root._stale(gen)) {
-                root.busyLabel = ""
-                root._emitToast("The safe locked before " + name + " was destroyed — it is still in the safe")
-                return
-            }
-            _deleteEntries(item, name, gen)
-        })
+    readonly property int trashGraceSeconds: 7
+    // [{id, entries, deadline}] — entries is the removed subtree; the id is
+    // what the card holds to undo a batch before the window expires.
+    property var pendingTrash: []
+    property int _trashSeq: 0
+
+    function trashAt(path) {
+        return trashMany([path])
     }
 
-    function _deleteEntries(item, name, gen) {
-        const list = []
-        for (const it of root.items)
-            if (it !== item && !SafeModel.isUnder(it.path, item.path))
-                list.push(it)
-        root.items = list
-        // If the card was inside the deleted folder, walk back up.
-        if (root.currentFolder === item.path || SafeModel.isUnder(root.currentFolder, item.path))
-            root.currentFolder = SafeModel.parentOf(item.path)
-        _writeIndex(ok => {
-            root.busyLabel = ""
-            root._emitToast(ok ? "Destroyed " + name : "Could not update the index")
+    // One grace window and one index rewrite for the whole batch.
+    function trashMany(paths) {
+        if (root.phase !== "unlocked")
+            return ""
+        const wanted = (paths || []).map(p => String(p)).filter(p => p !== "")
+        if (!wanted.length)
+            return ""
+        const subtree = (root.items || []).filter(
+            it => wanted.indexOf(it.path) !== -1
+                || wanted.some(p => SafeModel.isUnder(it.path, p)))
+        if (!subtree.length)
+            return ""
+        const removed = {}
+        for (const it of subtree)
+            removed[it.path] = true
+        root.items = (root.items || []).filter(it => removed[it.path] !== true)
+        // If the card was inside a trashed folder, walk back up.
+        for (const p of wanted) {
+            if (root.currentFolder === p || SafeModel.isUnder(root.currentFolder, p))
+                root.currentFolder = SafeModel.parentOf(p)
+        }
+        _writeIndex(function (ok) {
+            if (!ok) {
+                // The index could not be rewritten — put everything back
+                // rather than pretend the delete happened.
+                root.items = root.items.concat(subtree)
+                root._emitToast("Could not update the index")
+                return
+            }
         })
+        root._trashSeq++
+        const id = "t" + root._trashSeq
+        root.pendingTrash = root.pendingTrash.concat([{
+            id: id,
+            entries: subtree,
+            deadline: Date.now() + root.trashGraceSeconds * 1000
+        }])
+        trashTimer.restart()
+        return id
+    }
+
+    function undoTrash(id) {
+        const idx = root.pendingTrash.findIndex(t => t.id === id)
+        if (idx < 0)
+            return false
+        const t = root.pendingTrash[idx]
+        root.pendingTrash = root.pendingTrash.filter(tt => tt.id !== id)
+        if (!root.pendingTrash.length)
+            trashTimer.stop()
+        if (root.phase !== "unlocked")
+            return false
+        root.items = root.items.concat(t.entries)
+        _writeIndex(function (ok) {
+            if (!ok)
+                root._emitToast("Could not update the index")
+        })
+        return true
+    }
+
+    function _sweepTrash() {
+        if (!root.pendingTrash.length) {
+            trashTimer.stop()
+            return
+        }
+        const now = Date.now()
+        // A lock ends the grace early: undo is impossible without the
+        // session, so the stated intent (delete) is carried out.
+        const due = root.pendingTrash.filter(
+            t => now >= t.deadline || root.phase !== "unlocked")
+        if (!due.length)
+            return
+        root.pendingTrash = root.pendingTrash.filter(t => !due.includes(t))
+        if (!root.pendingTrash.length)
+            trashTimer.stop()
+        const argv = ["rm", "-f", "--"]
+        for (const t of due)
+            for (const it of t.entries)
+                if (!it.isDir)
+                    argv.push(root.vaultDir + "/" + it.id)
+        if (argv.length > 2)
+            _enqueue(argv, {}, function (code, out) { })
+    }
+
+    Timer {
+        id: trashTimer
+        interval: 500
+        running: false
+        repeat: true
+        onTriggered: root._sweepTrash()
     }
 
     // Changing the password proves the caller knows a current secret first —
