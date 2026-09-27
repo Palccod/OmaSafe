@@ -362,6 +362,18 @@ function isImage(name) {
     return imageExts.indexOf(extOf(name)) !== -1
 }
 
+function isVideo(name) {
+    return videoExts.indexOf(extOf(name)) !== -1
+}
+
+function isAudio(name) {
+    return audioExts.indexOf(extOf(name)) !== -1
+}
+
+function isDoc(name) {
+    return docExts.indexOf(extOf(name)) !== -1
+}
+
 // Extensions the preview lightbox shows as text: the first bytes are read
 // from the decrypted scratch copy. Deliberately conservative — everything
 // else gets the "no preview" note.

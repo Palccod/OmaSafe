@@ -280,3 +280,17 @@ test("isText whitelist covers documents and code, nothing else", () => {
   assert.equal(model.isText("photo.png"), false);
   assert.equal(model.isText("noext"), false);
 });
+
+test("media type checks route extensions to the sidebar filters", () => {
+  assert.equal(model.isImage("wallpaper.jpg"), true);
+  assert.equal(model.isVideo("clip.mkv"), true);
+  assert.equal(model.isAudio("song.OPUS"), true);
+  assert.equal(model.isDoc("manual.pdf"), true);
+  assert.equal(model.isDoc("notes.md"), true);
+  // A file lands in exactly one bucket — none of the others.
+  assert.equal(model.isVideo("wallpaper.jpg"), false);
+  assert.equal(model.isAudio("clip.mkv"), false);
+  assert.equal(model.isImage("song.opus"), false);
+  assert.equal(model.isDoc("clip.mkv"), false);
+  assert.equal(model.isVideo("noext"), false);
+});

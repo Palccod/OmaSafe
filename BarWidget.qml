@@ -58,6 +58,10 @@ Panel {
     readonly property string glyphList: "\u{F0572}"          // nf-md-view-list
     readonly property string glyphSearch: "\u{F0349}"        // nf-md-magnify
     readonly property string glyphSort: "\u{F023F}"          // nf-md-sort
+    readonly property string glyphImage: "\u{F0318}"         // nf-md-image-multiple
+    readonly property string glyphDoc: "\u{F09EE}"           // nf-md-file-document
+    readonly property string glyphMusic: "\u{F0386}"         // nf-md-music-note
+    readonly property string glyphVideo: "\u{F0A1C}"         // nf-md-video-vintage
     readonly property string glyphChevronRight: "\u{F0142}"  // nf-md-chevron-right
     readonly property string glyphSettings: "\u{F0493}"      // nf-md-cog
     readonly property string glyphSelect: "\u{F0132}"        // nf-md-checkbox-multiple-marked
@@ -97,14 +101,38 @@ Panel {
     // What the list and grid Repeaters show: search results while a search
     // is live, otherwise the open folder's children — run through the view
     // sort in both cases.
+    // What the list and grid Repeaters show. Precedence: a type-filtered
+    // vault-wide flat list, then search results, then the open folder —
+    // sorted in every case.
     readonly property var currentListing: SafeModel.sortEntries(
-        root.searchMode ? root.searchResults.items
+        root.typeFilter > 0 ? root.filterByType(root.svc ? root.svc.items : [])
+        : root.searchMode ? root.searchResults.items
                         : (root.svc ? root.svc.visibleItems : []),
         root.sortMode)
     // Listing sort: 0 = name, 1 = newest first, 2 = largest. Persisted on
     // the service; the toolbar button cycles it.
     readonly property int sortMode: root.svc ? root.svc.sortMode : 0
     readonly property var sortLabels: ["name", "newest first", "largest first"]
+    // Type filter (the sidebar): 0 = all files, then images, documents,
+    // music, videos. Non-zero modes list that type vault-wide, flat.
+    property int typeFilter: 0
+    readonly property var typeFilterModel: [
+        { label: "All Files", icon: root.glyphFolderOpen, empty: "files" },
+        { label: "Images", icon: root.glyphImage, empty: "images" },
+        { label: "Documents", icon: root.glyphDoc, empty: "documents" },
+        { label: "Music", icon: root.glyphMusic, empty: "music" },
+        { label: "Videos", icon: root.glyphVideo, empty: "videos" }
+    ]
+
+    function filterByType(items) {
+        if (root.typeFilter === 0 || !items)
+            return items
+        const check = root.typeFilter === 1 ? SafeModel.isImage
+            : root.typeFilter === 2 ? SafeModel.isDoc
+            : root.typeFilter === 3 ? SafeModel.isAudio
+            : SafeModel.isVideo
+        return items.filter(it => !it.isDir && check(it.path))
+    }
     // Grid image thumbnails, per the preferences toggle.
     readonly property bool showThumbnails: !root.svc || root.svc.showThumbnails
 
@@ -279,11 +307,12 @@ Panel {
         root.flashPath = ""
     }
 
-    // Jump from a search result to where it lives: folders open in place,
-    // files land in their folder with the row flashing briefly.
+    // Jump from a search or filter result to where it lives: folders open
+    // in place, files land in their folder with the row flashing briefly.
     function revealItem(path, isDir) {
         if (!root.svc)
             return
+        root.typeFilter = 0
         root.svc.navigate(isDir ? path : SafeModel.parentOf(path))
         root.exitSearch()
         if (!isDir) {
@@ -647,8 +676,7 @@ Panel {
                 }
             }
 
-            // Fixed top: header, toolbar, search, selection — the
-            // listing below is the only thing that scrolls.
+            // Fixed top: the header. Hides while settings are up.
             Column {
                 id: fixedTop
                 visible: !root.settingsOpen
@@ -741,6 +769,120 @@ Panel {
                         }
                     }
                 }
+
+            }
+
+            // Type filter sidebar — All Files, then media types. Filters
+            // are vault-wide and flat; collapses while locked or in settings.
+            Column {
+                id: sidebar
+                visible: root.showContents && !root.settingsOpen
+                anchors.top: fixedTop.bottom
+                anchors.bottom: fixedBottom.top
+                anchors.left: parent.left
+                anchors.topMargin: Style.space(6)
+                anchors.bottomMargin: Style.space(6)
+                width: root.showContents && !root.settingsOpen ? Style.space(148) : 0
+                clip: true
+                spacing: Style.space(2)
+
+                Repeater {
+                    model: root.typeFilterModel
+
+                    delegate: Rectangle {
+                        required property int index
+                        required property var modelData
+
+                        width: sidebar.width - Style.space(8)
+                        height: Style.space(28)
+                        radius: Math.min(Style.cornerRadius, Style.space(6))
+                        color: root.typeFilter === index ? Qt.alpha(root.foreground, 0.09)
+                             : sideHover.hovered ? Qt.alpha(root.foreground, 0.05) : "transparent"
+
+                        HoverHandler { id: sideHover }
+
+                        TapHandler { onTapped: root.typeFilter = index }
+
+                        Row {
+                            anchors.verticalCenter: parent.verticalCenter
+                            anchors.left: parent.left
+                            anchors.leftMargin: Style.space(8)
+                            spacing: Style.space(8)
+
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: modelData.icon
+                                textFormat: Text.PlainText
+                                color: root.typeFilter === index ? Color.accent : Qt.alpha(root.foreground, 0.7)
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.body
+                            }
+
+                            Text {
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: modelData.label
+                                textFormat: Text.PlainText
+                                elide: Text.ElideRight
+                                width: sidebar.width - Style.space(52)
+                                color: root.typeFilter === index ? root.foreground : Qt.alpha(root.foreground, 0.7)
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.bodySmall
+                                font.bold: root.typeFilter === index
+                            }
+                        }
+                    }
+                }
+
+                PanelSeparator {}
+
+                Rectangle {
+                    width: sidebar.width - Style.space(8)
+                    height: Style.space(28)
+                    radius: Math.min(Style.cornerRadius, Style.space(6))
+                    color: root.settingsOpen ? Qt.alpha(root.foreground, 0.09)
+                         : settingsHover.hovered ? Qt.alpha(root.foreground, 0.05) : "transparent"
+
+                    HoverHandler { id: settingsHover }
+
+                    TapHandler { onTapped: root.settingsOpen = true }
+
+                    Row {
+                        anchors.verticalCenter: parent.verticalCenter
+                        anchors.left: parent.left
+                        anchors.leftMargin: Style.space(8)
+                        spacing: Style.space(8)
+
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: root.glyphSettings
+                            textFormat: Text.PlainText
+                            color: root.settingsOpen ? Color.accent : Qt.alpha(root.foreground, 0.7)
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.body
+                        }
+
+                        Text {
+                            anchors.verticalCenter: parent.verticalCenter
+                            text: "Settings"
+                            textFormat: Text.PlainText
+                            color: root.settingsOpen ? root.foreground : Qt.alpha(root.foreground, 0.7)
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.bodySmall
+                            font.bold: root.settingsOpen
+                        }
+                    }
+                }
+            }
+
+            // Toolbar, search and selection — right of the sidebar.
+            Column {
+                id: listingTop
+                visible: !root.settingsOpen
+                anchors.top: fixedTop.bottom
+                anchors.left: sidebar.right
+                anchors.right: parent.right
+                anchors.topMargin: Style.space(6)
+                spacing: Style.space(6)
 
                 // Toolbar: breadcrumbs on the left, layout toggle on
                 // the right.
@@ -919,9 +1061,9 @@ Panel {
             Flickable {
                 id: scroll
                 visible: !root.settingsOpen
-                anchors.top: fixedTop.bottom
+                anchors.top: listingTop.bottom
                 anchors.bottom: fixedBottom.top
-                anchors.left: parent.left
+                anchors.left: sidebar.right
                 anchors.right: parent.right
                 anchors.topMargin: Style.space(6)
                 anchors.bottomMargin: Style.space(6)
@@ -1622,7 +1764,7 @@ Panel {
                                             root.toggleSelected(rowDelegate.modelData.path)
                                             return
                                         }
-                                        if (root.searchMode) {
+                                        if (root.searchMode || root.typeFilter > 0) {
                                             root.revealItem(rowDelegate.modelData.path, rowDelegate.isFolder)
                                             return
                                         }
@@ -1702,7 +1844,7 @@ Panel {
                                         elide: Text.ElideRight
                                         textFormat: Text.PlainText
                                         text: {
-                                            if (root.searchMode)
+                                            if (root.searchMode || root.typeFilter > 0)
                                                 return "in " + (rowDelegate.parentDir === "/" ? "safe root" : rowDelegate.parentDir)
                                             if (rowHover.hovered)
                                                 return rowDelegate.stagePath !== ""
@@ -1919,7 +2061,7 @@ Panel {
                                                 root.toggleSelected(tileDelegate.modelData.path)
                                                 return
                                             }
-                                            if (root.searchMode) {
+                                            if (root.searchMode || root.typeFilter > 0) {
                                                 root.revealItem(tileDelegate.modelData.path, tileDelegate.isFolder)
                                                 return
                                             }
@@ -1989,7 +2131,7 @@ Panel {
 
                                         Text {
                                             width: parent.width
-                                            text: root.searchMode
+                                            text: root.searchMode || root.typeFilter > 0
                                                 ? "in " + (tileDelegate.parentDir === "/" ? "safe root" : tileDelegate.parentDir)
                                                 : tileDelegate.isFolder
                                                 ? (tileDelegate.childCount === 1 ? "1 item" : tileDelegate.childCount + " items")
@@ -2041,10 +2183,10 @@ Panel {
 
                         // Empty state — a folder can be empty while the safe
                         // is not; the wording follows the location. A live
-                        // search has its own empty story below.
+                        // search or a type filter has its own empty story.
                         Column {
                             visible: root.showContents && !root.searchMode
-                                     && (!root.svc || root.svc.visibleItems.length === 0)
+                                     && (!root.svc || root.currentListing.length === 0)
                             width: parent.width
                             spacing: Style.space(6)
 
@@ -2056,7 +2198,8 @@ Panel {
                             Text {
                                 anchors.horizontalCenter: parent.horizontalCenter
                                 width: parent.width
-                                text: !root.svc || (root.svc.currentFolder === "/" && root.svc.itemCount === 0)
+                                text: root.typeFilter > 0 ? root.typeFilterModel[root.typeFilter].icon
+                                      : !root.svc || (root.svc.currentFolder === "/" && root.svc.itemCount === 0)
                                       ? root.glyphDrop : root.glyphFolderOpen
                                 textFormat: Text.PlainText
                                 elide: Text.ElideRight
@@ -2069,7 +2212,9 @@ Panel {
                             Text {
                                 width: parent.width
                                 horizontalAlignment: Text.AlignHCenter
-                                text: !root.svc || (root.svc.currentFolder === "/" && root.svc.itemCount === 0)
+                                text: root.typeFilter > 0
+                                      ? "No " + root.typeFilterModel[root.typeFilter].empty + " in the safe"
+                                      : !root.svc || (root.svc.currentFolder === "/" && root.svc.itemCount === 0)
                                       ? "The safe is empty"
                                       : "This folder is empty"
                                 textFormat: Text.PlainText
@@ -2081,7 +2226,9 @@ Panel {
                             Text {
                                 width: parent.width
                                 horizontalAlignment: Text.AlignHCenter
-                                text: !root.svc || (root.svc.currentFolder === "/" && root.svc.itemCount === 0)
+                                text: root.typeFilter > 0
+                                      ? "Everything of this type shows up here, from any folder."
+                                      : !root.svc || (root.svc.currentFolder === "/" && root.svc.itemCount === 0)
                                       ? "Drop files or folders here — or on the bar icon. Press an item and drag it anywhere to take it out."
                                       : "Drop files here to add them inside this folder."
                                 textFormat: Text.PlainText
