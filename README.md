@@ -1,21 +1,29 @@
 # OmaSafe
 
-![OmaSafe card](preview.png)
-
-| Locked | Change password |
-| --- | --- |
-| ![Locked card](locked.png) | ![Change password card](change-password.png) |
+![OmaSafe in a floating window](default.png)
 
 An encrypted drop-safe for Omarchy's bar. Drag files, media, or whole folders
 onto the safe and they are locked away: each file is encrypted with
 AES-256-CBC (PBKDF2, 250k iterations) and sealed with an HMAC-SHA256
 authentication tag that is verified before anything is ever decrypted — a
 tampered file is refused, not opened — and the original is removed. Opening
-the safe shows a small file explorer — browse folders, switch between list
-and grid, and drop files into the folder you're looking at — and lets you
-unlock items back to `~/Downloads/OmaSafe` or destroy them. Safes from
-before 0.6.0 are upgraded to the authenticated format automatically, a few
-files at a time, on the first unlock after the update.
+the safe opens a floating, resizable file explorer: a sidebar that filters
+the whole vault by type, whole-vault search, list and grid views with image
+thumbnails, undoable deletes, a preview lightbox, and drop-into-folder
+filing. Safes from before 0.6.0 are upgraded to the authenticated format
+automatically, a few files at a time, on the first unlock after the update.
+
+| Whole-vault search | Multi-select |
+| --- | --- |
+| ![Whole-vault search](search.png) | ![Multi-select with bulk delete](multi-select.png) |
+
+| Settings | Locked |
+| --- | --- |
+| ![Settings](settings.png) | ![Locked card](locked.png) |
+
+| Change password |
+| --- |
+| ![Change password card](change-password.png) |
 
 ## Install
 
@@ -25,20 +33,36 @@ omarchy plugin add https://github.com/palccod/OmaSafe --enable
 
 ## How it works
 
+- **Open the safe** — click the shield in the bar and a floating window
+  opens: drag it anywhere, resize it to taste, and it stays up while you
+  work elsewhere. It reopens at its default size every time.
 - **Lock something away** — drag files or folders onto the bar icon (works
-  mid-drag, no click needed first), onto the open card, or straight onto a
-  folder inside the card to file it there. Symlinks are refused; everything
+  mid-drag, no click needed first), onto the open window, or straight onto
+  a folder inside it to file it there. Symlinks are refused; everything
   else is fair game.
 - **Browse** — folders are stored as real structure (one encrypted blob per
   file), so clicking a folder shows its contents instantly, with nothing
-  decrypted until you take an item out. Drop files while a folder is open and
-  they land inside it. Safes from before 0.4.0 stored a folder as one tar
-  blob; on the first unlock they are upgraded to the browsable layout
-  automatically.
-- **Unlock** — click the shield and type your password. A back-up key
-  (64 hex digits) also opens the safe and is stored nowhere; if you lose
-  both the password and the key, the contents are gone.
-- **Change password** — the key button in the card (or the banner that
+  decrypted until you take an item out. The sidebar filters the whole vault
+  by type — All Files, Images, Documents, Music, Videos — and the toolbar
+  sorts by name, newest added, or largest, in grid or list view with image
+  thumbnails. Safes from before 0.4.0 stored a folder as one tar blob; on
+  the first unlock they are upgraded to the browsable layout automatically.
+- **Search** — the search bar filters the whole vault by name. Results show
+  where they live ("in /projects"), and clicking one jumps to its folder.
+- **Multi-select** — the checkbox in the toolbar turns clicks into picks.
+  Drag the selection into any app as a batch, or Delete it in one stroke.
+- **Delete & undo** — deleting is instant and undoable: a toast offers Undo
+  for a few seconds while the encrypted copy is still on disk, and Undo
+  restores the very same items without re-encrypting anything. Bulk delete
+  is one undoable batch. (There is no confirmation dialog — the undo is the
+  confirmation.)
+- **Preview** — click a file to view it in place: images large, text files
+  as text (scrolling), with arrow keys stepping through the files of the
+  current view.
+- **Unlock** — type your password. A back-up key (64 hex digits) also opens
+  the safe and is stored nowhere; if you lose both the password and the
+  key, the contents are gone.
+- **Change password** — the key button in the header (or the banner that
   appears after unlocking with the back-up key). Prove who you are with the
   current password **or** the back-up key; on success both wraps are
   rewritten and a brand-new back-up key is issued, shown exactly once. The
@@ -52,18 +76,21 @@ omarchy plugin add https://github.com/palccod/OmaSafe --enable
   the password issues a fresh back-up key, so the banner offers to refresh
   the keyring copy too. Deleting the keyring or its item (from seahorse or
   any keyring manager) revokes nothing — the vault never depends on it.
-- **Drag out** — press an item in the card and drag it straight into any
-  window (file manager, editor, chat): the item is decrypted to a tmpfs
-  staging area and the drag carries a normal `file://` url, so the target
-  takes a plain copy. Staged plaintext is wiped when the safe locks, or
-  after ten minutes at the latest.
+- **Drag out** — press an item and drag it straight into any window (file
+  manager, editor, chat): the item is decrypted to a tmpfs staging area and
+  the drag carries a normal `file://` url, so the target takes a plain
+  copy. In select mode the drag carries the whole selection. Staged
+  plaintext is wiped when the safe locks, or after ten minutes at the
+  latest.
 - **Extract** — the download button on an item decrypts it into
   `~/Downloads/OmaSafe` (renaming on collision, never overwriting).
-- **Destroy** — the trash button erases the encrypted copy for good, after
-  a confirmation.
-- **Auto-lock** — the safe locks itself 15 seconds after the card closes
-  (configurable in the card, or disable it). Locking also happens on
+- **Auto-lock** — the safe locks itself 15 seconds after the window closes
+  and, optionally, after ten minutes of no input; both are toggles in the
+  settings. Locking also happens on
   `omarchy-shell palccod.omasafe.vault lock` and at shell shutdown.
+- **Settings** — the cog in the header (or the sidebar's Settings entry):
+  remove-originals, both auto-locks, grid thumbnails. Sort, layout, and
+  every preference persist across restarts.
 
 ## Privacy model
 
@@ -117,21 +144,31 @@ Consequences worth knowing:
   banner reminds you); recovery with a stale copy simply fails, it never
   half-unlocks.
 
-## Preferences
+## Settings
 
-Toggles live at the bottom of the card:
+The cog in the header (or the sidebar's Settings entry) opens the settings
+page. Everything is saved and survives restarts:
 
-- **Remove originals** — on (default), dropping a file moves it into the
+- **Remove originals** — on by default: dropping a file moves it into the
   safe. Off, it is copied and the original stays put. Deletion is only ever
   attempted for paths inside your home directory.
-- **Auto-lock after closing** — on (default, 15s).
+- **Auto-lock after closing** — on by default, 15 seconds.
+- **Auto-lock when idle** — off by default; locks the safe after ten
+  minutes of no input, wherever the focus is. A running job waits for it to
+  finish.
+- **Grid thumbnails** — on by default; turns the decrypted preview
+  thumbnails off without affecting the preview lightbox.
+
+The listing's sort (name / newest / largest) and the grid-or-list layout
+are also remembered.
 
 ## CLI
 
 ```bash
 omarchy-shell palccod.omasafe.vault status      # {"phase":"locked","items":3,...}
 omarchy-shell palccod.omasafe.vault lock        # lock now
-omarchy-shell palccod.omasafe open              # open the card
+omarchy-shell palccod.omasafe open              # open the window
+omarchy-shell palccod.omasafe toggle            # open or close it
 omarchy-shell palccod.omasafe.vault stash '{"paths":["/home/you/photo.jpg"]}'
 ```
 
