@@ -248,7 +248,8 @@ Panel {
 
     // Select mode: clicks toggle selection instead of opening; a bar offers
     // the bulk actions on everything chosen.
-    property bool selectMode: false    property var selectedPaths: []
+    property bool selectMode: false
+    property var selectedPaths: []
     readonly property int selectedCount: root.selectedPaths.length
 
     function isSelected(path) {
