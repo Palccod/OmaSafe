@@ -1924,10 +1924,11 @@ Panel {
                             id: tilesGrid
                             visible: root.showContents && root.gridMode
                             width: parent.width
-                            // The floating window can be pulled wide — more
-                            // room, more columns.
-                            columns: Math.max(3, Math.floor(width / Style.space(200)))
-                            columnSpacing: Style.space(8)
+                            // File-manager density: narrow cells, more
+                            // columns; names wrap instead of widening the
+                            // column.
+                            columns: Math.max(3, Math.floor(width / Style.space(128)))
+                            columnSpacing: Style.space(4)
                             rowSpacing: Style.space(8)
 
                                 Repeater {
@@ -1955,8 +1956,12 @@ Panel {
                                         ? SafeModel.urlFromPath(tileDelegate.stagePath) : ""
                                     property bool folderHover: false
 
-                                    width: Math.floor((parent.width - Style.space(16)) / parent.columns)
-                                    height: Style.space(84)
+                                    width: Math.floor((parent.width - (parent.columns - 1) * parent.columnSpacing) / parent.columns)
+                                    // Height follows the content, so a name
+                                    // that wraps to two lines fits the cell
+                                    // the way a file manager grows it.
+                                    height: Style.space(12) + tileThumbBox.height
+                                        + nameText.implicitHeight + metaText.implicitHeight + Style.space(4)
                                     radius: Math.min(Style.cornerRadius, Style.space(8))
                                     // File-manager style: the tile itself is
                                     // invisible until the pointer is on it.
@@ -2153,10 +2158,16 @@ Panel {
                                         }
 
                                         Text {
+                                            id: nameText
                                             width: parent.width
                                             text: tileDelegate.name
                                             textFormat: Text.PlainText
-                                            elide: Text.ElideMiddle
+                                            // File-manager behaviour: wrap
+                                            // onto a second line, breaking
+                                            // anywhere in long file names.
+                                            wrapMode: Text.WrapAnywhere
+                                            maximumLineCount: 2
+                                            elide: Text.ElideRight
                                             horizontalAlignment: Text.AlignHCenter
                                             color: root.foreground
                                             font.family: root.fontFamily
@@ -2164,6 +2175,7 @@ Panel {
                                         }
 
                                         Text {
+                                            id: metaText
                                             width: parent.width
                                             text: root.searchMode || root.typeFilter > 0
                                                 ? "in " + (tileDelegate.parentDir === "/" ? "safe root" : tileDelegate.parentDir)
