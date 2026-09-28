@@ -66,6 +66,7 @@ Panel {
     readonly property string glyphChevronRight: "\u{F0142}"  // nf-md-chevron-right
     readonly property string glyphSettings: "\u{F0493}"      // nf-md-cog
     readonly property string glyphSelect: "\u{F0132}"        // nf-md-checkbox-multiple-marked
+    readonly property string glyphPencil: "\u{F03EB}"        // nf-md-pencil (render-verified)
 
     // Which card to show is derived state — the service is the only source
     // of truth, so a lock from IPC or the timer lands the card back on the
@@ -197,10 +198,57 @@ Panel {
                              })
     }
 
+    // Inline rename: a small modal over the card, pre-filled with the item's
+    // current name. Accepting hands the new basename to the service — blobs
+    // are addressed by id, so this rewrites the index, never the plaintext.
+    property bool renameOpen: false
+    property string renamePath: ""
+    property bool renameIsDir: false
+
+    // The staged path worth showing for `key`: normally the decrypted file
+    // itself, but for formats Qt cannot decode (AVIF) the service stages a
+    // converted sibling and the entry's `preview` names it. The drag payload
+    // stays the original file either way.
+    function stagedImagePath(key) {
+        if (!root.svc || !root.svc.staged || !root.svc.staged[key])
+            return ""
+        const e = root.svc.staged[key]
+        return String(e.preview || e.path || "")
+    }
+
+    function beginRename(path, name, isDir) {
+        if (!root.svc || String(path || "") === "")
+            return
+        root.renamePath = String(path)
+        root.renameIsDir = isDir === true
+        root.renameOpen = true
+        renameField.text = SafeModel.baseNameOf(path)
+        Qt.callLater(function () {
+            if (root.renameOpen) {
+                renameField.forceActiveFocus()
+                renameField.selectAll()
+            }
+        })
+    }
+
+    function commitRename() {
+        if (!root.renameOpen || !root.svc)
+            return
+        const oldPath = root.renamePath
+        if (!root.svc.renameItem(oldPath, renameField.text))
+            return
+        root.renameOpen = false
+        const newPath = SafeModel.childPath(SafeModel.parentOf(oldPath),
+                                            SafeModel.safeName(renameField.text))
+        if (newPath !== oldPath) {
+            root.flashPath = newPath
+            flashTimer.restart()
+        }
+    }
+
     // Select mode: clicks toggle selection instead of opening; a bar offers
     // the bulk actions on everything chosen.
-    property bool selectMode: false
-    property var selectedPaths: []
+    property bool selectMode: false    property var selectedPaths: []
     readonly property int selectedCount: root.selectedPaths.length
 
     function isSelected(path) {
@@ -355,6 +403,8 @@ Panel {
             root.settingsOpen = false
             root.selectMode = false
             root.selectedPaths = []
+            root.renameOpen = false
+            root.renamePath = ""
             // A locked safe can offer keyring recovery — check whether the
             // dedicated keyring exists before the unlock card shows.
             if (root.svc && root.svc.phase === "locked")
@@ -1611,8 +1661,8 @@ Panel {
                                 // thumbnail): decrypted on hover or press.
                                 readonly property string stagePath: !!root.svc && root.svc.staged && root.svc.staged[modelData.path]
                                     ? String(root.svc.staged[modelData.path].path) : ""
-                                readonly property url thumbUrl: root.showThumbnails && rowDelegate.stagePath !== "" && SafeModel.isImage(rowDelegate.name)
-                                    ? SafeModel.urlFromPath(rowDelegate.stagePath) : ""
+                                readonly property url thumbUrl: root.showThumbnails && SafeModel.isImage(rowDelegate.name)
+                                    ? SafeModel.urlFromPath(root.stagedImagePath(rowDelegate.modelData.path)) : ""
                                 // Highlight while a dragged payload hovers a
                                 // folder: that drop lands inside it.
                                 property bool folderHover: false
@@ -1906,6 +1956,16 @@ Panel {
 
                                     PanelActionButton {
                                         anchors.verticalCenter: parent.verticalCenter
+                                        iconText: root.glyphPencil
+                                        tooltipText: "Rename"
+                                        foreground: root.foreground
+                                        fontFamily: root.fontFamily
+                                        enabled: !root.svc || !root.svc.busy
+                                        onClicked: root.beginRename(rowDelegate.modelData.path, rowDelegate.name, rowDelegate.isFolder)
+                                    }
+
+                                    PanelActionButton {
+                                        anchors.verticalCenter: parent.verticalCenter
                                         iconText: root.glyphTrash
                                         tooltipText: "Delete — undoable for a few seconds"
                                         foreground: root.foreground
@@ -1952,8 +2012,8 @@ Panel {
                                     readonly property string parentDir: SafeModel.dirname(modelData.path)
                                     readonly property string stagePath: !!root.svc && root.svc.staged && root.svc.staged[modelData.path]
                                         ? String(root.svc.staged[modelData.path].path) : ""
-                                    readonly property url thumbUrl: root.showThumbnails && tileDelegate.stagePath !== "" && SafeModel.isImage(tileDelegate.name)
-                                        ? SafeModel.urlFromPath(tileDelegate.stagePath) : ""
+                                    readonly property url thumbUrl: root.showThumbnails && SafeModel.isImage(tileDelegate.name)
+                                        ? SafeModel.urlFromPath(root.stagedImagePath(tileDelegate.modelData.path)) : ""
                                     property bool folderHover: false
 
                                     width: Math.floor((parent.width - (parent.columns - 1) * parent.columnSpacing) / parent.columns)
@@ -2204,24 +2264,33 @@ Panel {
                                             NumberAnimation { duration: 90 }
                                         }
 
-                                        PanelActionButton {
-                                            iconText: root.glyphDownload
-                                            tooltipText: "Unlock to Downloads/OmaSafe"
-                                            foreground: root.foreground
-                                            fontFamily: root.fontFamily
-                                            enabled: !root.svc || !root.svc.busy
-                                            onClicked: root.svc.extractAt(tileDelegate.modelData.path)
-                                        }
+                                    PanelActionButton {
+                                        iconText: root.glyphDownload
+                                        tooltipText: "Unlock to Downloads/OmaSafe"
+                                        foreground: root.foreground
+                                        fontFamily: root.fontFamily
+                                        enabled: !root.svc || !root.svc.busy
+                                        onClicked: root.svc.extractAt(tileDelegate.modelData.path)
+                                    }
 
-                                        PanelActionButton {
-                                            iconText: root.glyphTrash
-                                            tooltipText: "Delete — undoable for a few seconds"
-                                            foreground: root.foreground
-                                            hoverColor: Color.urgent
-                                            fontFamily: root.fontFamily
-                                            enabled: !root.svc || !root.svc.busy
-                                            onClicked: root.requestDelete(tileDelegate.modelData.path)
-                                        }
+                                    PanelActionButton {
+                                        iconText: root.glyphPencil
+                                        tooltipText: "Rename"
+                                        foreground: root.foreground
+                                        fontFamily: root.fontFamily
+                                        enabled: !root.svc || !root.svc.busy
+                                        onClicked: root.beginRename(tileDelegate.modelData.path, tileDelegate.name, tileDelegate.isFolder)
+                                    }
+
+                                    PanelActionButton {
+                                        iconText: root.glyphTrash
+                                        tooltipText: "Delete — undoable for a few seconds"
+                                        foreground: root.foreground
+                                        hoverColor: Color.urgent
+                                        fontFamily: root.fontFamily
+                                        enabled: !root.svc || !root.svc.busy
+                                        onClicked: root.requestDelete(tileDelegate.modelData.path)
+                                    }
                                     }
                                 }
                             }
@@ -2598,9 +2667,12 @@ Panel {
                         anchors.fill: parent
                         // loadable is decoupled from status so visible and
                         // source never reference each other (binding loop).
-                        readonly property bool loadable: previewBox.isImg && previewBox.stagePath !== ""
+                        // The image itself: for AVIF the service stages a
+                        // PNG sibling Qt can actually decode.
+                        readonly property string imgPath: root.stagedImagePath(root.previewPath)
+                        readonly property bool loadable: previewBox.isImg && imgPath !== ""
                         visible: loadable && status !== Image.Error
-                        source: loadable ? SafeModel.urlFromPath(previewBox.stagePath) : ""
+                        source: loadable ? SafeModel.urlFromPath(imgPath) : ""
                         asynchronous: true
                         fillMode: Image.PreserveAspectFit
                     }
@@ -2697,6 +2769,88 @@ Panel {
                         fontFamily: root.fontFamily
                         enabled: root.previewablePaths.indexOf(root.previewPath) < root.previewablePaths.length - 1
                         onClicked: root.previewStep(1)
+                    }
+                }
+            }
+
+            // Rename dialog -----------------------------------------------------
+            // Modal over the card: one TextField pre-filled with the current
+            // name, Enter commits, Escape or a click outside backs out. The
+            // service toasts the reason when a name is refused.
+            Rectangle {
+                anchors.fill: parent
+                visible: root.renameOpen
+                color: Qt.rgba(0, 0, 0, 0.45)
+                z: 30
+
+                TapHandler {
+                    onTapped: root.renameOpen = false
+                }
+
+                Rectangle {
+                    width: parent.width - Style.space(48)
+                    height: renameColumn.implicitHeight + Style.space(24)
+                    anchors.centerIn: parent
+                    radius: Math.min(Style.cornerRadius, Style.space(10))
+                    color: Color.popups.background
+                    border.width: 1
+                    border.color: Color.popups.border
+
+                    // Clicks inside the panel must not fall through to the
+                    // dim backdrop's dismiss handler.
+                    MouseArea {
+                        anchors.fill: parent
+                    }
+
+                    Column {
+                        id: renameColumn
+                        anchors.fill: parent
+                        anchors.margins: Style.space(12)
+                        spacing: Style.space(10)
+
+                        Text {
+                            width: parent.width
+                            text: root.renameIsDir ? "Rename folder" : "Rename file"
+                            color: root.foreground
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.body
+                            font.bold: true
+                        }
+
+                        TextField {
+                            id: renameField
+                            width: parent.width
+                            placeholderText: "New name"
+                            foreground: root.foreground
+                            font.family: root.fontFamily
+                            enabled: !root.svc || !root.svc.busy
+                            onAccepted: root.commitRename()
+                            Keys.onEscapePressed: root.renameOpen = false
+                        }
+
+                        Row {
+                            width: parent.width
+                            spacing: Style.space(8)
+
+                            Button {
+                                width: (parent.width - Style.space(8)) / 2
+                                text: "Cancel"
+                                foreground: root.foreground
+                                accent: Color.accent
+                                fontFamily: root.fontFamily
+                                onClicked: root.renameOpen = false
+                            }
+
+                            Button {
+                                width: (parent.width - Style.space(8)) / 2
+                                text: "Rename"
+                                foreground: root.foreground
+                                accent: Color.accent
+                                fontFamily: root.fontFamily
+                                enabled: !root.svc || !root.svc.busy
+                                onClicked: root.commitRename()
+                            }
+                        }
                     }
                 }
             }

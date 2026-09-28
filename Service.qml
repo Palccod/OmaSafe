@@ -670,7 +670,7 @@ Item {
     // the plaintext is on disk — Drag.startDrag() blocks until the drop lands,
     // so it must be the plain path by then.
 
-    function _stageDone(key, path, ok, name, gen) {
+    function _stageDone(key, path, ok, name, gen, preview) {
         delete root._staging[key]
         root.busyLabel = ""
         // Locked mid-staging: the stage wipe is already queued behind this
@@ -684,9 +684,11 @@ Item {
         }
         // A fresh object every time: reassigning the same reference would not
         // fire the change signal, and the chips' stage-path bindings would
-        // never see the new entry.
+        // never see the new entry. `preview` is an optional sibling file Qt
+        // can decode when the payload itself is in a format it cannot (AVIF)
+        // — the drag payload stays the original.
         const map = Object.assign({}, root.staged)
-        map[key] = { path: path, at: Date.now() }
+        map[key] = { path: path, preview: preview || "", at: Date.now() }
         root.staged = map
     }
 
@@ -727,7 +729,24 @@ Item {
                              { OS_SECRET: root.sessionKey }, (dc, do2) => {
                         if (dc === root.exitLegacy)
                             root._reencryptBlob(target, item.id, gen)
-                        _stageDone(item.path, target, dc === 0 || dc === root.exitLegacy, name, gen)
+                        const ok = dc === 0 || dc === root.exitLegacy
+                        // Qt ships no AVIF image plugin here, so the plain
+                        // decrypted file would never show as a thumbnail or
+                        // preview. Decode a PNG sibling with avifdec (from
+                        // libavif, already on the system) — best effort; the
+                        // original file stays the drag payload either way.
+                        if (ok && SafeModel.extOf(name) === "avif") {
+                            _enqueue(["avifdec", target, target + ".png"], {}, ac => {
+                                if (root._stale(gen)) {
+                                    _stageDone(item.path, "", false, name, gen)
+                                    return
+                                }
+                                _stageDone(item.path, target, true, name, gen,
+                                           ac === 0 ? target + ".png" : "")
+                            })
+                            return
+                        }
+                        _stageDone(item.path, target, ok, name, gen)
                     })
                     return
                 }
@@ -1643,6 +1662,50 @@ Item {
 
     function _emitToast(message) {
         root.toast(message)
+    }
+
+    // --- renaming ---------------------------------------------------------------
+
+    // Renames a file or folder in place. Blobs are addressed by their random
+    // id, so nothing is re-encrypted and no plaintext ever hits disk — a
+    // rename is a rewrite of the index: the item's path, and for a folder,
+    // the prefix of every path stored under it. Returns false when the name
+    // is unusable (the toast says why); the index write itself is async and
+    // rolls the listing back if it fails.
+    function renameItem(path, newName) {
+        if (root.phase !== "unlocked")
+            return false
+        const item = (root.items || []).find(it => it.path === path)
+        if (!item)
+            return false
+        const clean = SafeModel.safeName(newName)
+        const newPath = SafeModel.childPath(SafeModel.parentOf(path), clean)
+        if (newPath === path)
+            return true
+        if ((root.items || []).some(it => it.path === newPath)) {
+            root._emitToast("Something called \"" + clean + "\" is already in that folder")
+            return false
+        }
+        const previous = root.items
+        const renamed = previous.map(it => {
+            if (it.path === path)
+                return Object.assign({}, it, { path: newPath })
+            if (SafeModel.isUnder(it.path, path))
+                return Object.assign({}, it, { path: SafeModel.childPath(newPath, it.path.substring(path.length + 1)) })
+            return it
+        })
+        // Chips and staged plaintext keyed by the old path die with it.
+        const staged = Object.assign({}, root.staged)
+        delete staged[path]
+        root.staged = staged
+        delete root._staging[path]
+        root.items = renamed
+        root._writeIndex(ok => {
+            // The index on disk still carries the old names — mirror it.
+            if (!ok)
+                root.items = previous
+        })
+        return true
     }
 
     // --- stashing (drag & drop / IPC) ------------------------------------------
@@ -2563,6 +2626,12 @@ Item {
                 items: root.itemCount,
                 busy: root.busy
             })
+        }
+
+        // rename <vault-path> <new-basename> — index-only; "1" on accept,
+        // "0" when refused (unknown path, name taken, safe locked).
+        function rename(path: string, name: string): string {
+            return root.renameItem(String(path), String(name)) ? "1" : "0"
         }
 
         // Takes the same {"paths": [...]} wrapper the ledge uses: a bare JSON
