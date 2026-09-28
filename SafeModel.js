@@ -356,6 +356,35 @@ function itemGlyph(name, isDir) {
     return "\u{F0264}"     // nf-md-file
 }
 
+// Freedesktop icon-theme name for an item — the file-manager-style icons
+// shown in the listing via "image://icon/<name>". Names are picked from
+// what Yaru ships; the widget falls back to the nerd-font glyph when a
+// theme lacks one.
+const archiveExts = ["zip", "tar", "gz", "xz", "bz2", "zst", "7z", "rar"]
+const scriptExts = ["js", "mjs", "py", "sh", "html", "css", "json", "xml",
+                    "yml", "yaml", "toml", "conf", "cfg", "ini", "env"]
+
+function iconName(name, isDir) {
+    if (isDir)
+        return "folder"
+    const ext = extOf(name)
+    if (ext === "pdf")
+        return "application-pdf"
+    if (ext === "md")
+        return "text-markdown"
+    if (imageExts.indexOf(ext) !== -1)
+        return "image-x-generic"
+    if (videoExts.indexOf(ext) !== -1)
+        return "video-x-generic"
+    if (audioExts.indexOf(ext) !== -1)
+        return "audio-x-generic"
+    if (archiveExts.indexOf(ext) !== -1)
+        return "package-x-generic"
+    if (scriptExts.indexOf(ext) !== -1)
+        return "text-x-script"
+    return "text-x-generic"
+}
+
 // True for file types the thumbnail box can render once the item is
 // staged (decrypted) in the scratch dir.
 function isImage(name) {

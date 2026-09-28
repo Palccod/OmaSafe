@@ -3,6 +3,7 @@ pragma ComponentBehavior: Bound
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import Quickshell.Widgets
 import qs.Commons
 import qs.Ui
 import "SafeModel.js" as SafeModel
@@ -1596,6 +1597,7 @@ Panel {
                                 // service's one-time upgrade explodes it.
                                 readonly property bool browsable: rowDelegate.isFolder && modelData.legacy !== true
                                 readonly property string glyph: SafeModel.itemGlyph(rowDelegate.name, modelData.isDir)
+                                readonly property string themeIcon: SafeModel.iconName(rowDelegate.name, modelData.isDir)
                                 readonly property string ext: SafeModel.extOf(rowDelegate.name)
                                 // Where the item lives — in search mode the
                                 // row shows this instead of size, since the
@@ -1618,8 +1620,10 @@ Panel {
                                 width: parent.width
                                 implicitHeight: Style.space(56)
                                 radius: Math.min(Style.cornerRadius, Style.space(8))
+                                // File-manager style: rows sit on the plain
+                                // background until hovered.
                                 color: rowDelegate.modelData.path === root.flashPath ? Qt.alpha(Color.accent, 0.22)
-                                    : rowDelegate.folderHover || rowHover.hovered ? Qt.alpha(root.foreground, 0.07) : Qt.alpha(root.foreground, 0.035)
+                                    : rowDelegate.folderHover || rowHover.hovered ? Qt.alpha(root.foreground, 0.07) : "transparent"
                                 border.width: 1
                                 border.color: root.isSelected(modelData.path) || rowDelegate.folderHover
                                     ? Color.accent
@@ -1793,7 +1797,7 @@ Panel {
                                     height: Style.space(44)
                                     radius: Math.min(rowDelegate.radius, Style.space(6))
                                     clip: true
-                                    color: thumb.status === Image.Ready ? "transparent" : Qt.alpha(root.foreground, 0.06)
+                                    color: "transparent"
 
                                     Image {
                                         id: thumb
@@ -1807,9 +1811,22 @@ Panel {
                                         sourceSize.height: Style.space(88)
                                     }
 
+                                    // Theme icon, as a file manager shows;
+                                    // nerd glyph only if the theme lacks it.
+                                    IconImage {
+                                        id: rowIcon
+                                        anchors.centerIn: parent
+                                        width: Style.space(36)
+                                        height: width
+                                        implicitSize: width
+                                        visible: thumb.status !== Image.Ready && rowIcon.status !== Image.Error
+                                        source: "image://icon/" + rowDelegate.themeIcon
+                                        asynchronous: true
+                                    }
+
                                     Text {
                                         anchors.centerIn: parent
-                                        visible: thumb.status !== Image.Ready
+                                        visible: thumb.status !== Image.Ready && rowIcon.status === Image.Error
                                         width: parent.width
                                         text: rowDelegate.glyph
                                         textFormat: Text.PlainText
@@ -1926,6 +1943,7 @@ Panel {
                                     readonly property bool isFolder: modelData.isDir === true
                                     readonly property bool browsable: tileDelegate.isFolder && modelData.legacy !== true
                                     readonly property string glyph: SafeModel.itemGlyph(tileDelegate.name, modelData.isDir)
+                                    readonly property string themeIcon: SafeModel.iconName(tileDelegate.name, modelData.isDir)
                                     readonly property int childCount: tileDelegate.isFolder
                                         ? (root.svc ? SafeModel.childrenOf(root.svc.items, modelData.path).length : 0) : 0
                                     // In search mode the tile shows where the
@@ -1940,8 +1958,10 @@ Panel {
                                     width: Math.floor((parent.width - Style.space(16)) / parent.columns)
                                     height: Style.space(84)
                                     radius: Math.min(Style.cornerRadius, Style.space(8))
+                                    // File-manager style: the tile itself is
+                                    // invisible until the pointer is on it.
                                     color: tileDelegate.modelData.path === root.flashPath ? Qt.alpha(Color.accent, 0.22)
-                                        : tileDelegate.folderHover || tileHover.hovered ? Qt.alpha(root.foreground, 0.07) : Qt.alpha(root.foreground, 0.035)
+                                        : tileDelegate.folderHover || tileHover.hovered ? Qt.alpha(root.foreground, 0.07) : "transparent"
                                     border.width: 1
                                     border.color: root.isSelected(modelData.path) || tileDelegate.folderHover
                                         ? Color.accent
@@ -2091,7 +2111,7 @@ Panel {
                                             anchors.horizontalCenter: parent.horizontalCenter
                                             radius: Math.min(Style.cornerRadius, Style.space(6))
                                             clip: true
-                                            color: tileThumb.status === Image.Ready ? "transparent" : Qt.alpha(root.foreground, 0.06)
+                                            color: "transparent"
 
                                             Image {
                                                 id: tileThumb
@@ -2105,10 +2125,24 @@ Panel {
                                                 sourceSize.height: Style.space(80)
                                             }
 
-                                            Text {
+                                            // Theme icon, exactly like a file
+                                            // manager shows; the nerd glyph is
+                                            // only a fallback for themes that
+                                            // lack the mime icon.
+                                            IconImage {
                                                 id: tileIcon
                                                 anchors.centerIn: parent
-                                                visible: tileThumb.status !== Image.Ready
+                                                width: Style.space(34)
+                                                height: width
+                                                implicitSize: width
+                                                visible: tileThumb.status !== Image.Ready && tileIcon.status !== Image.Error
+                                                source: "image://icon/" + tileDelegate.themeIcon
+                                                asynchronous: true
+                                            }
+
+                                            Text {
+                                                anchors.centerIn: parent
+                                                visible: tileThumb.status !== Image.Ready && tileIcon.status === Image.Error
                                                 text: tileDelegate.glyph
                                                 textFormat: Text.PlainText
                                                 elide: Text.ElideRight
