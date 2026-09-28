@@ -1662,7 +1662,11 @@ Panel {
                                 // thumbnail): decrypted on hover or press.
                                 readonly property string stagePath: !!root.svc && root.svc.staged && root.svc.staged[modelData.path]
                                     ? String(root.svc.staged[modelData.path].path) : ""
-                                readonly property url thumbUrl: root.showThumbnails && SafeModel.isImage(rowDelegate.name)
+                                // Images show real thumbnails; videos show
+                                // the staged frame grab (the PNG sibling the
+                                // service decodes alongside the payload).
+                                readonly property url thumbUrl: root.showThumbnails
+                                    && (SafeModel.isImage(rowDelegate.name) || SafeModel.isVideo(rowDelegate.name))
                                     ? SafeModel.urlFromPath(root.stagedImagePath(rowDelegate.modelData.path)) : ""
                                 // Highlight while a dragged payload hovers a
                                 // folder: that drop lands inside it.
@@ -2013,7 +2017,11 @@ Panel {
                                     readonly property string parentDir: SafeModel.dirname(modelData.path)
                                     readonly property string stagePath: !!root.svc && root.svc.staged && root.svc.staged[modelData.path]
                                         ? String(root.svc.staged[modelData.path].path) : ""
-                                    readonly property url thumbUrl: root.showThumbnails && SafeModel.isImage(tileDelegate.name)
+                                    // Images show real thumbnails; videos show
+                                    // the staged frame grab (the PNG sibling
+                                    // the service decodes alongside the payload).
+                                    readonly property url thumbUrl: root.showThumbnails
+                                        && (SafeModel.isImage(tileDelegate.name) || SafeModel.isVideo(tileDelegate.name))
                                         ? SafeModel.urlFromPath(root.stagedImagePath(tileDelegate.modelData.path)) : ""
                                     property bool folderHover: false
 
@@ -2789,7 +2797,9 @@ Panel {
                 }
 
                 Rectangle {
-                    width: parent.width - Style.space(48)
+                    // A name field needs only a strip of the card — not the
+                    // full width it had at first.
+                    width: Math.min(parent.width - Style.space(48), Style.space(340))
                     height: renameColumn.implicitHeight + Style.space(24)
                     anchors.centerIn: parent
                     radius: Math.min(Style.cornerRadius, Style.space(10))

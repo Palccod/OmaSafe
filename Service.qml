@@ -730,13 +730,18 @@ Item {
                         if (dc === root.exitLegacy)
                             root._reencryptBlob(target, item.id, gen)
                         const ok = dc === 0 || dc === root.exitLegacy
-                        // Qt ships no AVIF image plugin here, so the plain
-                        // decrypted file would never show as a thumbnail or
-                        // preview. Decode a PNG sibling with avifdec (from
-                        // libavif, already on the system) — best effort; the
-                        // original file stays the drag payload either way.
-                        if (ok && SafeModel.extOf(name) === "avif") {
-                            _enqueue(["avifdec", target, target + ".png"], {}, ac => {
+                        // Qt decodes neither AVIF nor video as a still
+                        // image, so the plain decrypted file would never
+                        // show as a thumbnail or preview. Decode a PNG
+                        // sibling — avifdec for AVIF, a mid-video frame
+                        // grab for videos — best effort; the original file
+                        // stays the drag payload either way.
+                        if (ok && (SafeModel.extOf(name) === "avif" || SafeModel.isVideo(name))) {
+                            const conv = SafeModel.extOf(name) === "avif"
+                                ? ["avifdec", target, target + ".png"]
+                                : ["ffmpegthumbnailer", "-i", target,
+                                   "-o", target + ".png", "-s", "256"]
+                            _enqueue(conv, {}, ac => {
                                 if (root._stale(gen)) {
                                     _stageDone(item.path, "", false, name, gen)
                                     return
