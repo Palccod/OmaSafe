@@ -2584,8 +2584,11 @@ Panel {
                     Image {
                         id: previewImg
                         anchors.fill: parent
-                        visible: previewBox.isImg && previewBox.stagePath !== "" && status !== Image.Error
-                        source: visible ? SafeModel.urlFromPath(previewBox.stagePath) : ""
+                        // loadable is decoupled from status so visible and
+                        // source never reference each other (binding loop).
+                        readonly property bool loadable: previewBox.isImg && previewBox.stagePath !== ""
+                        visible: loadable && status !== Image.Error
+                        source: loadable ? SafeModel.urlFromPath(previewBox.stagePath) : ""
                         asynchronous: true
                         fillMode: Image.PreserveAspectFit
                     }
