@@ -397,23 +397,31 @@ Panel {
     }
 
     // The menu entries for the current ctxItem — null means the background,
-    // where the folder-level actions live (create entries, select all).
+    // where the folder-level actions live (create, paste, select all).
     readonly property var ctxEntries: {
         const it = root.ctxItem
         if (!it) {
             const here = root.svc && !root.searchMode && root.typeFilter === 0
                 ? root.svc.currentFolder : "/"
-            return [
+            const out = [
                 { label: "New note", fn: function () { root.beginCreate("note", here) } },
-                { label: "New folder", fn: function () { root.beginCreate("folder", here) } },
-                { label: "Select all", fn: function () { root.selectAllVisible() } }
+                { label: "New folder", fn: function () { root.beginCreate("folder", here) } }
             ]
+            if (root.clipPaths.length > 0)
+                out.push({ label: root.clipCut ? "Paste (move) here" : "Paste here",
+                           fn: function () { root.pasteClipboard(here) } })
+            out.push({ label: "Select all", fn: function () { root.selectAllVisible() } })
+            return out
         }
         const out = []
         if (it.isDir && it.legacy !== true)
             out.push({ label: "Open", fn: function () { root.activateItem(it) } })
         else if (!it.isDir)
             out.push({ label: "Preview", fn: function () { root.activateItem(it) } })
+        out.push({ label: "Copy", fn: function () { root.copyToClip(it, false) } })
+        out.push({ label: "Cut", fn: function () { root.copyToClip(it, true) } })
+        if (root.clipPaths.length > 0 && it.isDir && it.legacy !== true)
+            out.push({ label: "Paste inside", fn: function () { root.pasteClipboard(it.path) } })
         out.push({ label: "Rename", fn: function () {
             root.beginRename(it.path, SafeModel.baseNameOf(it.path), it.isDir === true)
         } })
@@ -422,6 +430,50 @@ Panel {
         } })
         out.push({ label: "Delete", danger: true, fn: function () { root.requestDelete(it.path) } })
         return out
+    }
+
+    // The safe's internal clipboard: paths marked Copy/Cut, pasted into a
+    // folder from its context menu (or Ctrl+V). Cut entries render dimmed.
+    property var clipPaths: []
+    property bool clipCut: false
+
+    function isCutPath(p) {
+        return root.clipCut && root.clipPaths.indexOf(String(p)) !== -1
+    }
+
+    // Copy/cut act on the context item — or the whole selection in select
+    // mode when the item is part of it.
+    function clipSourcePaths(item) {
+        if (root.selectMode && item && root.isSelected(item.path))
+            return root.selectedPaths.slice()
+        return item ? [String(item.path)] : []
+    }
+
+    function copyToClip(item, cut) {
+        const paths = root.clipSourcePaths(item)
+        if (!paths.length)
+            return
+        root.clipPaths = paths
+        root.clipCut = cut === true
+        root.showToast((cut ? "Cut " : "Copied ") + paths.length
+                       + (paths.length === 1 ? " item" : " items")
+                       + " — paste from a folder's menu")
+    }
+
+    function pasteClipboard(targetFolder) {
+        if (!root.svc || !root.clipPaths.length)
+            return
+        const n = root.clipCut
+            ? root.svc.moveItems(root.clipPaths, targetFolder)
+            : root.svc.copyItems(root.clipPaths, targetFolder)
+        if (n > 0) {
+            root.showToast((root.clipCut ? "Moved " : "Pasted ") + n
+                           + (n === 1 ? " item" : " items"))
+            if (root.clipCut) {
+                root.clipPaths = []
+                root.clipCut = false
+            }
+        }
     }
 
     // Select mode: clicks toggle selection instead of opening; a bar offers
@@ -853,15 +905,26 @@ Panel {
             Keys.onPressed: function (event) {
                 if (!root.navActive())
                     return
+                const ctrl = (event.modifiers & Qt.ControlModifier) !== 0
                 if (event.key === Qt.Key_F2) {
                     root.renameCursor()
                     event.accepted = true
                 } else if (event.key === Qt.Key_Delete) {
                     root.deleteCursor()
                     event.accepted = true
-                } else if (event.key === Qt.Key_A
-                           && (event.modifiers & Qt.ControlModifier)) {
+                } else if (event.key === Qt.Key_A && ctrl) {
                     root.selectAllVisible()
+                    event.accepted = true
+                } else if (event.key === Qt.Key_C && ctrl) {
+                    root.copyToClip(root.cursorItem(), false)
+                    event.accepted = true
+                } else if (event.key === Qt.Key_X && ctrl) {
+                    root.copyToClip(root.cursorItem(), true)
+                    event.accepted = true
+                } else if (event.key === Qt.Key_V && ctrl) {
+                    const here = root.svc && !root.searchMode && root.typeFilter === 0
+                        ? root.svc.currentFolder : "/"
+                    root.pasteClipboard(here)
                     event.accepted = true
                 }
             }
@@ -2101,6 +2164,9 @@ Panel {
                                     radius: Math.min(rowDelegate.radius, Style.space(6))
                                     clip: true
                                     color: "transparent"
+                                    // Cut entries render dimmed, like any
+                                    // file manager's pending move.
+                                    opacity: root.isCutPath(rowDelegate.modelData.path) ? 0.45 : 1
 
                                     Image {
                                         id: thumb
@@ -2458,6 +2524,9 @@ Panel {
                                             radius: Math.min(Style.cornerRadius, Style.space(6))
                                             clip: true
                                             color: "transparent"
+                                            // Cut entries render dimmed, like
+                                            // any file manager's pending move.
+                                            opacity: root.isCutPath(tileDelegate.modelData.path) ? 0.45 : 1
 
                                             Image {
                                                 id: tileThumb

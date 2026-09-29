@@ -1769,6 +1769,116 @@ Item {
         return target
     }
 
+    // --- the safe's clipboard ----------------------------------------------------
+
+    // Copies entries into targetFolder without touching a single blob: the
+    // new index entries share the source blob id, so a copy costs no space
+    // until the copies diverge (a later re-stash replaces only the one
+    // entry, and blob deletion refcounts). Folders copy their whole
+    // subtree. Returns the number of top-level entries copied.
+    function copyItems(paths, targetFolder) {
+        if (root.phase !== "unlocked")
+            return 0
+        const target = root.isFolder(targetFolder) ? targetFolder : "/"
+        const list = (root.items || []).slice()
+        const out = []
+        const taken = root._takenPaths()
+        let copied = 0
+        for (const raw of (paths || [])) {
+            const src = String(raw || "")
+            const item = list.find(it => it.path === src)
+            if (!item)
+                continue
+            if (item.isDir && (target === src || SafeModel.isUnder(target, src))) {
+                root._emitToast("Cannot copy " + SafeModel.baseNameOf(src) + " into itself")
+                continue
+            }
+            const base = SafeModel.baseNameOf(src)
+            const dest = root._uniqueVaultPath(target, base,
+                                               taken.concat(out.map(it => it.path)))
+            out.push({ id: item.id, path: dest, isDir: item.isDir, legacy: item.legacy,
+                       size: item.size, addedAt: Date.now() })
+            for (const it of list) {
+                if (SafeModel.isUnder(it.path, src)) {
+                    out.push({ id: it.id, path: SafeModel.childPath(dest, it.path.substring(src.length + 1)),
+                               isDir: it.isDir, legacy: it.legacy, size: it.size, addedAt: Date.now() })
+                }
+            }
+            taken.push(dest)
+            copied++
+        }
+        if (!copied)
+            return 0
+        for (const e of out) {
+            if (e.isDir)
+                continue
+            for (const anc of root._ancestorPaths(e.path))
+                if (!list.some(it => it.path === anc) && !out.some(it => it.path === anc))
+                    out.push({ id: "", path: anc, isDir: true, legacy: false, size: 0, addedAt: Date.now() })
+        }
+        root.items = list.concat(out)
+        root._writeIndex(ok => {
+            if (!ok)
+                root._emitToast("Could not paste — the index did not update")
+        })
+        return copied
+    }
+
+    // Cut-and-paste: rewrites paths like a batch rename. Name collisions in
+    // the target are skipped with a toast, never merged. Returns the number
+    // of top-level entries moved.
+    function moveItems(paths, targetFolder) {
+        if (root.phase !== "unlocked")
+            return 0
+        const target = root.isFolder(targetFolder) ? targetFolder : "/"
+        const previous = root.items
+        const pairs = []
+        const taken = root._takenPaths()
+        for (const raw of (paths || [])) {
+            const src = String(raw || "")
+            const item = previous.find(it => it.path === src)
+            if (!item)
+                continue
+            if (item.isDir && (target === src || SafeModel.isUnder(target, src))) {
+                root._emitToast("Cannot move " + SafeModel.baseNameOf(src) + " into itself")
+                continue
+            }
+            const dest = SafeModel.childPath(target, SafeModel.baseNameOf(src))
+            if (dest === src)
+                continue
+            if (taken.indexOf(dest) !== -1) {
+                root._emitToast("Something called \"" + SafeModel.baseNameOf(src) + "\" is already in that folder")
+                continue
+            }
+            taken.push(dest)
+            pairs.push({ src: src, dest: dest })
+        }
+        if (!pairs.length)
+            return 0
+        const updated = previous.map(it => {
+            for (const pr of pairs) {
+                if (it.path === pr.src)
+                    return Object.assign({}, it, { path: pr.dest })
+                if (SafeModel.isUnder(it.path, pr.src))
+                    return Object.assign({}, it, { path: SafeModel.childPath(pr.dest, it.path.substring(pr.src.length + 1)) })
+            }
+            return it
+        })
+        // Chips and staged plaintext keyed by the old paths die with them.
+        const staged = Object.assign({}, root.staged)
+        for (const pr of pairs) {
+            delete staged[pr.src]
+            delete root._staging[pr.src]
+        }
+        root.staged = staged
+        root.items = updated
+        root._writeIndex(ok => {
+            if (!ok)
+                root.items = previous
+        })
+        return pairs.length
+    }
+
     // --- stashing (drag & drop / IPC) ------------------------------------------
 
     // Every path already claimed in the index — the collision universe a new
@@ -1921,8 +2031,13 @@ Item {
                 root._emitToast(SafeModel.baseNameOf(vaultPath) + " is encrypted but not indexed — do not delete the original")
                 return
             }
-            if (replacing)
-                _enqueue(["rm", "-f", "--", root.vaultDir + "/" + replacedId], {}, () => {})
+            if (replacing) {
+                // The old blob dies only if no surviving entry still shares
+                // it — copies share their source's blob id.
+                const stillUsed = (root.items || []).some(it => !it.isDir && it.id === replacedId)
+                if (!stillUsed)
+                    _enqueue(["rm", "-f", "--", root.vaultDir + "/" + replacedId], {}, () => {})
+            }
             const verb = replacing ? "Updated " : "Locked "
             const base = SafeModel.baseNameOf(vaultPath)
             if (_deletable(originalPath)) {
@@ -2391,10 +2506,16 @@ Item {
         root.pendingTrash = root.pendingTrash.filter(t => !due.includes(t))
         if (!root.pendingTrash.length)
             trashTimer.stop()
+        // Shared blobs: a copy shares its source's blob id, so a blob is
+        // only deleted when no surviving index entry still references it.
+        const referenced = {}
+        for (const it of root.items)
+            if (!it.isDir && it.id)
+                referenced[it.id] = true
         const argv = ["rm", "-f", "--"]
         for (const t of due)
             for (const it of t.entries)
-                if (!it.isDir)
+                if (!it.isDir && !referenced[it.id])
                     argv.push(root.vaultDir + "/" + it.id)
         if (argv.length > 2)
             _enqueue(argv, {}, function (code, out) { })
