@@ -211,6 +211,14 @@ Panel {
     // the eye on any of them flips them all, which makes comparing a
     // password against its confirmation trivial. Reset with the session.
     property bool showSecrets: false
+    // True while a text input holds keyboard focus: that is the only time
+    // the key dispatcher must stand down. It used to stand down whenever
+    // the catcher itself lacked focus — which after the unlock field hid
+    // left the whole card keyboard-dead, focus on nothing.
+    readonly property bool fieldFocused: searchField.activeFocus
+        || unlockField.activeFocus || setupPassField.activeFocus
+        || setupConfirmField.activeFocus || changeOldField.activeFocus
+        || changeNewField.activeFocus || changeConfirmField.activeFocus
     property bool renameOpen: false
     property bool resetConfirmOpen: false
     property string renamePath: ""
@@ -275,6 +283,7 @@ Panel {
                 root.flashPath = newPath
                 flashTimer.restart()
             }
+            keyCatcher.forceActiveFocus()
             return
         }
         // Create modes: the service returns the path the entry will live
@@ -287,6 +296,7 @@ Panel {
             root.flashPath = made
             flashTimer.restart()
         }
+        keyCatcher.forceActiveFocus()
     }
 
     // Keyboard navigation: PanelKeyCatcher drives a cursor over the current
@@ -631,6 +641,9 @@ Panel {
         function onCurrentFolderChanged() {
             root.selectedPaths = []
         }
+        // The unlock field held focus and vanished with the phase — hand
+        // the keyboard back to the dispatcher, or the arrows are dead.
+        function onPhaseChangedFocus() {}
         // A group drag waits for the picked items to finish staging; the
         // last staged copy is what lets it start.
         function onStagedChanged() {
@@ -965,7 +978,7 @@ Panel {
                 // unlock password, rename) every key belongs to it — the
                 // dispatcher would otherwise eat letters like x or j before
                 // they reach the field, and Escape would close the card.
-                blocked: root.renameOpen || !keyCatcher.activeFocus
+                blocked: root.renameOpen || root.fieldFocused
 
                 onMoveRequested: function (dx, dy) { root.moveCursor(dx, dy) }
                 onActivateRequested: root.activateCursor()
@@ -1517,6 +1530,7 @@ Panel {
                             placeholderText: "Password (12+ characters)"
                             foreground: root.foreground
                             font.family: root.fontFamily
+                            id: setupPassField
                             text: root.setupPass
                             onTextChanged: root.setupPass = text
                             enabled: !root.svc || !root.svc.busy
@@ -1547,6 +1561,7 @@ Panel {
                             placeholderText: "Repeat password"
                             foreground: root.foreground
                             font.family: root.fontFamily
+                            id: setupConfirmField
                             text: root.setupConfirm
                             onTextChanged: root.setupConfirm = text
                             enabled: !root.svc || !root.svc.busy
@@ -1871,6 +1886,7 @@ Panel {
                             placeholderText: "Current password or back-up key"
                             foreground: root.foreground
                             font.family: root.fontFamily
+                            id: changeOldField
                             text: root.changeOld
                             onTextChanged: root.changeOld = text
                             enabled: !root.svc || !root.svc.busy
@@ -1901,6 +1917,7 @@ Panel {
                             placeholderText: "New password (12+ characters)"
                             foreground: root.foreground
                             font.family: root.fontFamily
+                            id: changeNewField
                             text: root.changeNew
                             onTextChanged: root.changeNew = text
                             enabled: !root.svc || !root.svc.busy
@@ -1931,6 +1948,7 @@ Panel {
                             placeholderText: "Repeat new password"
                             foreground: root.foreground
                             font.family: root.fontFamily
+                            id: changeConfirmField
                             text: root.changeConfirm
                             onTextChanged: root.changeConfirm = text
                             enabled: !root.svc || !root.svc.busy
