@@ -2231,7 +2231,7 @@ Panel {
                                 Column {
                                     anchors.left: thumbBox.right
                                     anchors.leftMargin: Style.space(10)
-                                    anchors.right: actionsRow.left
+                                    anchors.right: parent.right
                                     anchors.rightMargin: Style.space(8)
                                     anchors.verticalCenter: parent.verticalCenter
                                     spacing: Style.space(2)
@@ -2271,50 +2271,6 @@ Panel {
                                     }
                                 }
 
-                                Row {
-                                    id: actionsRow
-                                    anchors.right: parent.right
-                                    anchors.rightMargin: Style.space(8)
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    spacing: Style.space(2)
-                                    opacity: rowHover.hovered ? 1 : 0
-                                    enabled: opacity > 0
-
-                                    Behavior on opacity {
-                                        NumberAnimation { duration: 90 }
-                                    }
-
-                                    PanelActionButton {
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        iconText: root.glyphDownload
-                                        tooltipText: "Unlock to Downloads/OmaSafe"
-                                        foreground: root.foreground
-                                        fontFamily: root.fontFamily
-                                        enabled: !root.svc || !root.svc.busy
-                                        onClicked: root.svc.extractAt(rowDelegate.modelData.path)
-                                    }
-
-                                    PanelActionButton {
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        iconText: root.glyphPencil
-                                        tooltipText: "Rename"
-                                        foreground: root.foreground
-                                        fontFamily: root.fontFamily
-                                        enabled: !root.svc || !root.svc.busy
-                                        onClicked: root.beginRename(rowDelegate.modelData.path, rowDelegate.name, rowDelegate.isFolder)
-                                    }
-
-                                    PanelActionButton {
-                                        anchors.verticalCenter: parent.verticalCenter
-                                        iconText: root.glyphTrash
-                                        tooltipText: "Delete — undoable for a few seconds"
-                                        foreground: root.foreground
-                                        hoverColor: Color.urgent
-                                        fontFamily: root.fontFamily
-                                        enabled: !root.svc || !root.svc.busy
-                                        onClicked: root.requestDelete(rowDelegate.modelData.path)
-                                    }
-                                }
                             }
                         }
                         }
@@ -2627,47 +2583,6 @@ Panel {
                                         }
                                     }
 
-                                    // Hover actions, mirroring the list row.
-                                    Row {
-                                        anchors.top: parent.top
-                                        anchors.right: parent.right
-                                        anchors.margins: Style.space(4)
-                                        spacing: Style.space(2)
-                                        opacity: tileHover.hovered ? 1 : 0
-                                        enabled: opacity > 0
-
-                                        Behavior on opacity {
-                                            NumberAnimation { duration: 90 }
-                                        }
-
-                                    PanelActionButton {
-                                        iconText: root.glyphDownload
-                                        tooltipText: "Unlock to Downloads/OmaSafe"
-                                        foreground: root.foreground
-                                        fontFamily: root.fontFamily
-                                        enabled: !root.svc || !root.svc.busy
-                                        onClicked: root.svc.extractAt(tileDelegate.modelData.path)
-                                    }
-
-                                    PanelActionButton {
-                                        iconText: root.glyphPencil
-                                        tooltipText: "Rename"
-                                        foreground: root.foreground
-                                        fontFamily: root.fontFamily
-                                        enabled: !root.svc || !root.svc.busy
-                                        onClicked: root.beginRename(tileDelegate.modelData.path, tileDelegate.name, tileDelegate.isFolder)
-                                    }
-
-                                    PanelActionButton {
-                                        iconText: root.glyphTrash
-                                        tooltipText: "Delete — undoable for a few seconds"
-                                        foreground: root.foreground
-                                        hoverColor: Color.urgent
-                                        fontFamily: root.fontFamily
-                                        enabled: !root.svc || !root.svc.busy
-                                        onClicked: root.requestDelete(tileDelegate.modelData.path)
-                                    }
-                                    }
                                 }
                             }
                         }
