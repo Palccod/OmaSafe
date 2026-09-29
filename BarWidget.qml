@@ -476,6 +476,27 @@ Panel {
         }
     }
 
+    // Storage view numbers: the biggest files in the safe and the total
+    // plaintext the index accounts for (the on-disk number comes from the
+    // service's du measurement).
+    readonly property var largestItems: {
+        if (!root.svc || !root.svc.items)
+            return []
+        const files = (root.svc.items || []).filter(it => !it.isDir)
+        files.sort(function (a, b) { return b.size - a.size })
+        return files.slice(0, 5)
+    }
+
+    readonly property int plainBytes: {
+        if (!root.svc || !root.svc.items)
+            return 0
+        let s = 0
+        for (const it of root.svc.items)
+            if (!it.isDir)
+                s += Number(it.size) || 0
+        return s
+    }
+
     // Select mode: clicks toggle selection instead of opening; a bar offers
     // the bulk actions on everything chosen.
     property bool selectMode: false
@@ -751,6 +772,8 @@ Panel {
     property string previewText: ""
     // The settings page, opened from the header gear; swaps out the listing.
     property bool settingsOpen: false
+    // Opening the page refreshes the on-disk vault size it displays.
+    onSettingsOpenChanged: if (settingsOpen && root.svc) root.svc.refreshStorageStats()
 
     readonly property var previewablePaths: {
         const out = []
@@ -2822,11 +2845,21 @@ Panel {
 
             // Settings view — the preferences as their own page, reachable
             // from the header gear instead of buried at the bottom of the
-            // listing's scroll.
-            Column {
+            // listing's scroll. Scrollable, so the storage section always
+            // fits however small the window is.
+            Flickable {
                 visible: root.showContents && root.settingsOpen
                 anchors.fill: parent
-                spacing: Style.space(10)
+                contentWidth: width
+                contentHeight: settingsCol.implicitHeight
+                clip: true
+                boundsBehavior: Flickable.StopAtBounds
+                interactive: contentHeight > height
+
+                Column {
+                    id: settingsCol
+                    width: parent.width
+                    spacing: Style.space(10)
 
                 Item {
                     width: parent.width
@@ -2935,6 +2968,92 @@ Panel {
                         root.svc.showThumbnails = !root.svc.showThumbnails
                         root.svc._savePrefs()
                     }
+                }
+
+                PanelSeparator {}
+
+                // Storage ---------------------------------------------------
+                Column {
+                    width: parent.width
+                    spacing: Style.space(6)
+
+                    Text {
+                        width: parent.width
+                        text: "Storage"
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                        font.bold: true
+                    }
+
+                    Text {
+                        width: parent.width
+                        textFormat: Text.PlainText
+                        wrapMode: Text.WordWrap
+                        color: Qt.alpha(root.foreground, 0.75)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                        text: root.svc && root.svc.vaultBytes > 0
+                              ? SafeModel.humanSize(root.svc.vaultBytes) + " on disk · "
+                                + root.svc.itemCount + (root.svc.itemCount === 1 ? " item" : " items")
+                                + " · " + SafeModel.humanSize(root.plainBytes) + " of files"
+                              : "Measuring…"
+                    }
+
+                    Repeater {
+                        model: root.largestItems
+
+                        delegate: Item {
+                            required property int index
+                            required property var modelData
+                            width: parent.width
+                            height: Style.space(30)
+
+                            readonly property real ratio: root.largestItems.length
+                                ? modelData.size / Math.max(1, root.largestItems[0].size) : 0
+
+                            Text {
+                                anchors.left: parent.left
+                                anchors.top: parent.top
+                                anchors.right: sizeLabel.left
+                                anchors.rightMargin: Style.space(8)
+                                text: SafeModel.baseNameOf(modelData.path)
+                                textFormat: Text.PlainText
+                                elide: Text.ElideMiddle
+                                color: root.foreground
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.caption
+                            }
+
+                            Text {
+                                id: sizeLabel
+                                anchors.right: parent.right
+                                anchors.top: parent.top
+                                text: SafeModel.humanSize(modelData.size)
+                                textFormat: Text.PlainText
+                                color: Qt.alpha(root.foreground, 0.5)
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.caption
+                            }
+
+                            Rectangle {
+                                anchors.left: parent.left
+                                anchors.right: parent.right
+                                anchors.bottom: parent.bottom
+                                height: Style.space(3)
+                                radius: height / 2
+                                color: Qt.alpha(root.foreground, 0.08)
+
+                                Rectangle {
+                                    width: parent.width * Math.max(0.02, parent.ratio)
+                                    height: parent.height
+                                    radius: height / 2
+                                    color: Qt.alpha(Color.accent, 0.7)
+                                }
+                            }
+                        }
+                    }
+                }
                 }
             }
 

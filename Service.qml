@@ -1879,6 +1879,29 @@ Item {
         return pairs.length
     }
 
+    // --- storage stats -------------------------------------------------------------
+
+    // Bytes the vault actually occupies on disk (measured with du, so the
+    // authenticated overhead and every blob count). Refreshed when the
+    // storage view opens; stale values are harmless.
+    property int vaultBytes: 0
+
+    function refreshStorageStats() {
+        if (root.phase !== "unlocked")
+            return
+        const gen = root._generation
+        _enqueue(["sh", "-c", 'du -sb "$1" 2>/dev/null | cut -f1', "omasafe-du", root.vaultDir],
+                 {}, (code, out) => {
+            if (root._stale(gen))
+                return
+            if (code !== 0)
+                return
+            const v = parseInt(out.trim(), 10)
+            if (!isNaN(v) && v >= 0)
+                root.vaultBytes = v
+        })
+    }
+
     // --- stashing (drag & drop / IPC) ------------------------------------------
 
     // Every path already claimed in the index — the collision universe a new
