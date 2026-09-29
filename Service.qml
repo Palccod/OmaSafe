@@ -1713,6 +1713,62 @@ Item {
         return true
     }
 
+    // --- creating ---------------------------------------------------------------
+
+    // A new empty folder is pure structure: one index entry, no blob.
+    // Returns the new path, or "" when refused (the toast says why).
+    function createFolder(folder, name) {
+        if (root.phase !== "unlocked")
+            return ""
+        const clean = SafeModel.safeName(name)
+        const target = SafeModel.childPath(folder, clean)
+        if ((root.items || []).some(it => it.path === target)) {
+            root._emitToast("Something called \"" + clean + "\" is already there")
+            return ""
+        }
+        const list = (root.items || []).slice()
+        list.push({ id: "", path: target, isDir: true, legacy: false,
+                    size: 0, addedAt: Date.now() })
+        root.items = list
+        root._writeIndex(ok => {
+            if (!ok)
+                root._emitToast("Could not create the folder")
+        })
+        return target
+    }
+
+    // A new empty note: an empty text file is minted in the stage dir and
+    // pushed through the regular stash pipeline — encrypted, indexed, and
+    // the scratch original removed, exactly like a dropped file. Returns
+    // the path the note will live at (the write itself is async), or ""
+    // when refused.
+    function createNote(folder, name) {
+        if (root.phase !== "unlocked")
+            return ""
+        const clean = SafeModel.safeName(name)
+        const target = SafeModel.childPath(folder, clean)
+        if ((root.items || []).some(it => it.path === target)) {
+            root._emitToast("Something called \"" + clean + "\" is already there")
+            return ""
+        }
+        root.busyLabel = "Creating " + clean + "…"
+        const gen = root._generation
+        _withScratch(() => {
+            const tmp = root.stageDir + "/" + clean
+            _enqueue(["sh", "-c", ': > "$1"', "omasafe-note", tmp], {}, wc => {
+                if (root._stale(gen))
+                    return
+                if (wc !== 0) {
+                    root.busyLabel = ""
+                    root._emitToast("Could not create the note")
+                    return
+                }
+                root._stashOne(tmp, folder)
+            })
+        })
+        return target
+    }
+
     // --- stashing (drag & drop / IPC) ------------------------------------------
 
     // Every path already claimed in the index — the collision universe a new

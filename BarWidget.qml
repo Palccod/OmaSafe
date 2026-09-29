@@ -198,17 +198,21 @@ Panel {
                              })
     }
 
-    // Inline rename: a small modal over the card, pre-filled with the item's
-    // current name. Accepting hands the new basename to the service — blobs
-    // are addressed by id, so this rewrites the index, never the plaintext.
+    // Inline rename/create dialog: one small modal over the card. Rename
+    // pre-fills the item's current name; the create modes mint an empty
+    // note or a folder in `createTarget`. Accepting hands the basename to
+    // the service — blobs are addressed by id, so renames rewrite the
+    // index, never the plaintext.
     property bool renameOpen: false
     property string renamePath: ""
     property bool renameIsDir: false
+    property string dialogMode: "rename" // rename | note | folder
+    property string createTarget: "/"
 
     // The staged path worth showing for `key`: normally the decrypted file
-    // itself, but for formats Qt cannot decode (AVIF) the service stages a
-    // converted sibling and the entry's `preview` names it. The drag payload
-    // stays the original file either way.
+    // itself, but for formats Qt cannot decode (AVIF, video) the service
+    // stages a converted sibling and the entry's `preview` names it. The
+    // drag payload stays the original file either way.
     function stagedImagePath(key) {
         if (!root.svc || !root.svc.staged || !root.svc.staged[key])
             return ""
@@ -219,10 +223,27 @@ Panel {
     function beginRename(path, name, isDir) {
         if (!root.svc || String(path || "") === "")
             return
+        root.dialogMode = "rename"
         root.renamePath = String(path)
         root.renameIsDir = isDir === true
         root.renameOpen = true
         renameField.text = SafeModel.baseNameOf(path)
+        root.focusNameField()
+    }
+
+    // kind: "note" | "folder" — the folder the entry goes into is wherever
+    // the menu was raised, normally the folder being browsed.
+    function beginCreate(kind, folder) {
+        if (!root.svc)
+            return
+        root.dialogMode = kind
+        root.createTarget = typeof folder === "string" ? folder : "/"
+        root.renameOpen = true
+        renameField.text = kind === "note" ? "note.md" : "New folder"
+        root.focusNameField()
+    }
+
+    function focusNameField() {
         Qt.callLater(function () {
             if (root.renameOpen) {
                 renameField.forceActiveFocus()
@@ -234,14 +255,27 @@ Panel {
     function commitRename() {
         if (!root.renameOpen || !root.svc)
             return
-        const oldPath = root.renamePath
-        if (!root.svc.renameItem(oldPath, renameField.text))
+        if (root.dialogMode === "rename") {
+            const oldPath = root.renamePath
+            if (!root.svc.renameItem(oldPath, renameField.text))
+                return
+            root.renameOpen = false
+            const newPath = SafeModel.childPath(SafeModel.parentOf(oldPath),
+                                                SafeModel.safeName(renameField.text))
+            if (newPath !== oldPath) {
+                root.flashPath = newPath
+                flashTimer.restart()
+            }
             return
-        root.renameOpen = false
-        const newPath = SafeModel.childPath(SafeModel.parentOf(oldPath),
-                                            SafeModel.safeName(renameField.text))
-        if (newPath !== oldPath) {
-            root.flashPath = newPath
+        }
+        // Create modes: the service returns the path the entry will live
+        // at; the write itself is async and its toasts carry failures.
+        const made = root.dialogMode === "note"
+            ? root.svc.createNote(root.createTarget, renameField.text)
+            : root.svc.createFolder(root.createTarget, renameField.text)
+        if (made !== "") {
+            root.renameOpen = false
+            root.flashPath = made
             flashTimer.restart()
         }
     }
@@ -362,11 +396,19 @@ Panel {
         root.ctxOpen = true
     }
 
-    // The menu entries for the current ctxItem — null means the background.
+    // The menu entries for the current ctxItem — null means the background,
+    // where the folder-level actions live (create entries, select all).
     readonly property var ctxEntries: {
         const it = root.ctxItem
-        if (!it)
-            return [{ label: "Select all", fn: function () { root.selectAllVisible() } }]
+        if (!it) {
+            const here = root.svc && !root.searchMode && root.typeFilter === 0
+                ? root.svc.currentFolder : "/"
+            return [
+                { label: "New note", fn: function () { root.beginCreate("note", here) } },
+                { label: "New folder", fn: function () { root.beginCreate("folder", here) } },
+                { label: "Select all", fn: function () { root.selectAllVisible() } }
+            ]
+        }
         const out = []
         if (it.isDir && it.legacy !== true)
             out.push({ label: "Open", fn: function () { root.activateItem(it) } })
@@ -3051,7 +3093,9 @@ Panel {
 
                         Text {
                             width: parent.width
-                            text: root.renameIsDir ? "Rename folder" : "Rename file"
+                            text: root.dialogMode === "rename"
+                                  ? (root.renameIsDir ? "Rename folder" : "Rename file")
+                                  : root.dialogMode === "note" ? "New note" : "New folder"
                             color: root.foreground
                             font.family: root.fontFamily
                             font.pixelSize: Style.font.body
@@ -3084,7 +3128,7 @@ Panel {
 
                             Button {
                                 width: (parent.width - Style.space(8)) / 2
-                                text: "Rename"
+                                text: root.dialogMode === "rename" ? "Rename" : "Create"
                                 foreground: root.foreground
                                 accent: Color.accent
                                 fontFamily: root.fontFamily
