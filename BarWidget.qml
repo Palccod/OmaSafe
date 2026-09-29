@@ -375,7 +375,7 @@ Panel {
         out.push({ label: "Rename", fn: function () {
             root.beginRename(it.path, SafeModel.baseNameOf(it.path), it.isDir === true)
         } })
-        out.push({ label: "Unlock to Downloads/OmaSafe", fn: function () {
+        out.push({ label: "Unlock", fn: function () {
             if (root.svc) root.svc.extractAt(it.path)
         } })
         out.push({ label: "Delete", danger: true, fn: function () { root.requestDelete(it.path) } })
