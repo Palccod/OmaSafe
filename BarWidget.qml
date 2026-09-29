@@ -759,9 +759,12 @@ Panel {
         onCloseRequested: root.close()
 
         // Extra keys the shared catcher doesn't know (F2, Delete, Ctrl+A):
-        // it passes them over unaccepted and they bubble up to here.
+        // it passes them over unaccepted and they bubble up to here. The
+        // wrapper must fill the card — an unsized Item would collapse the
+        // whole content tree inside it.
         Item {
             id: keyZone
+            anchors.fill: parent
 
             Keys.onPressed: function (event) {
                 if (!root.navActive())
