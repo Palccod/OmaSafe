@@ -67,6 +67,8 @@ Panel {
     readonly property string glyphSettings: "\u{F0493}"      // nf-md-cog
     readonly property string glyphSelect: "\u{F0132}"        // nf-md-checkbox-multiple-marked
     readonly property string glyphPencil: "\u{F03EB}"        // nf-md-pencil (render-verified)
+    readonly property string glyphEye: "\u{F0B95}"           // nf-md-eye (render-verified)
+    readonly property string glyphEyeOff: "\u{F06D1}"        // nf-md-eye-off (render-verified)
 
     // Which card to show is derived state — the service is the only source
     // of truth, so a lock from IPC or the timer lands the card back on the
@@ -205,7 +207,12 @@ Panel {
     // note or a folder in `createTarget`. Accepting hands the basename to
     // the service — blobs are addressed by id, so renames rewrite the
     // index, never the plaintext.
+    // Password reveal: every secret field in the card shares one toggle —
+    // the eye on any of them flips them all, which makes comparing a
+    // password against its confirmation trivial. Reset with the session.
+    property bool showSecrets: false
     property bool renameOpen: false
+    property bool resetConfirmOpen: false
     property string renamePath: ""
     property bool renameIsDir: false
     property string dialogMode: "rename" // rename | note | folder
@@ -653,6 +660,8 @@ Panel {
             root.selectedPaths = []
             root.renameOpen = false
             root.renamePath = ""
+            root.resetConfirmOpen = false
+            root.showSecrets = false
             // A locked safe can offer keyring recovery — check whether the
             // dedicated keyring exists before the unlock card shows.
             if (root.svc && root.svc.phase === "locked")
@@ -965,7 +974,12 @@ Panel {
                 onCloseRequested: {
                 // ESC peels the layers back before it closes the window:
                 // context menu, then preview, then settings, then selection
-                // picks, then the card itself.
+                // the reset confirmation, then the picks, then the card
+                // itself.
+                if (root.resetConfirmOpen) {
+                    root.resetConfirmOpen = false
+                    return
+                }
                 if (root.ctxOpen) {
                     root.ctxOpen = false
                     return
@@ -1482,6 +1496,24 @@ Panel {
                         TextField {
                             width: parent.width
                             password: true
+                            // Reveal toggle; all secret fields share the state.
+                            echoMode: root.showSecrets ? TextInput.Normal : TextInput.Password
+                            rightPadding: horizontalPadding + Style.space(26)
+
+                            Text {
+                                anchors.right: parent.right
+                                anchors.rightMargin: Style.space(6)
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: root.showSecrets ? root.glyphEyeOff : root.glyphEye
+                                textFormat: Text.PlainText
+                                color: eyeHover1.hovered ? Color.accent : Qt.alpha(root.foreground, 0.55)
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.body
+
+                                HoverHandler { id: eyeHover1; cursorShape: Qt.PointingHandCursor }
+                                TapHandler { onTapped: root.showSecrets = !root.showSecrets }
+                            }
+
                             placeholderText: "Password (12+ characters)"
                             foreground: root.foreground
                             font.family: root.fontFamily
@@ -1494,6 +1526,24 @@ Panel {
                         TextField {
                             width: parent.width
                             password: true
+                            // Reveal toggle; all secret fields share the state.
+                            echoMode: root.showSecrets ? TextInput.Normal : TextInput.Password
+                            rightPadding: horizontalPadding + Style.space(26)
+
+                            Text {
+                                anchors.right: parent.right
+                                anchors.rightMargin: Style.space(6)
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: root.showSecrets ? root.glyphEyeOff : root.glyphEye
+                                textFormat: Text.PlainText
+                                color: eyeHover2.hovered ? Color.accent : Qt.alpha(root.foreground, 0.55)
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.body
+
+                                HoverHandler { id: eyeHover2; cursorShape: Qt.PointingHandCursor }
+                                TapHandler { onTapped: root.showSecrets = !root.showSecrets }
+                            }
+
                             placeholderText: "Repeat password"
                             foreground: root.foreground
                             font.family: root.fontFamily
@@ -1699,6 +1749,24 @@ Panel {
                             id: unlockField
                             width: parent.width
                             password: true
+                            // Reveal toggle; all secret fields share the state.
+                            echoMode: root.showSecrets ? TextInput.Normal : TextInput.Password
+                            rightPadding: horizontalPadding + Style.space(26)
+
+                            Text {
+                                anchors.right: parent.right
+                                anchors.rightMargin: Style.space(6)
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: root.showSecrets ? root.glyphEyeOff : root.glyphEye
+                                textFormat: Text.PlainText
+                                color: eyeHover3.hovered ? Color.accent : Qt.alpha(root.foreground, 0.55)
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.body
+
+                                HoverHandler { id: eyeHover3; cursorShape: Qt.PointingHandCursor }
+                                TapHandler { onTapped: root.showSecrets = !root.showSecrets }
+                            }
+
                             placeholderText: "Password or back-up key"
                             foreground: root.foreground
                             font.family: root.fontFamily
@@ -1782,6 +1850,24 @@ Panel {
                         TextField {
                             width: parent.width
                             password: true
+                            // Reveal toggle; all secret fields share the state.
+                            echoMode: root.showSecrets ? TextInput.Normal : TextInput.Password
+                            rightPadding: horizontalPadding + Style.space(26)
+
+                            Text {
+                                anchors.right: parent.right
+                                anchors.rightMargin: Style.space(6)
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: root.showSecrets ? root.glyphEyeOff : root.glyphEye
+                                textFormat: Text.PlainText
+                                color: eyeHover4.hovered ? Color.accent : Qt.alpha(root.foreground, 0.55)
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.body
+
+                                HoverHandler { id: eyeHover4; cursorShape: Qt.PointingHandCursor }
+                                TapHandler { onTapped: root.showSecrets = !root.showSecrets }
+                            }
+
                             placeholderText: "Current password or back-up key"
                             foreground: root.foreground
                             font.family: root.fontFamily
@@ -1794,6 +1880,24 @@ Panel {
                         TextField {
                             width: parent.width
                             password: true
+                            // Reveal toggle; all secret fields share the state.
+                            echoMode: root.showSecrets ? TextInput.Normal : TextInput.Password
+                            rightPadding: horizontalPadding + Style.space(26)
+
+                            Text {
+                                anchors.right: parent.right
+                                anchors.rightMargin: Style.space(6)
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: root.showSecrets ? root.glyphEyeOff : root.glyphEye
+                                textFormat: Text.PlainText
+                                color: eyeHover5.hovered ? Color.accent : Qt.alpha(root.foreground, 0.55)
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.body
+
+                                HoverHandler { id: eyeHover5; cursorShape: Qt.PointingHandCursor }
+                                TapHandler { onTapped: root.showSecrets = !root.showSecrets }
+                            }
+
                             placeholderText: "New password (12+ characters)"
                             foreground: root.foreground
                             font.family: root.fontFamily
@@ -1806,6 +1910,24 @@ Panel {
                         TextField {
                             width: parent.width
                             password: true
+                            // Reveal toggle; all secret fields share the state.
+                            echoMode: root.showSecrets ? TextInput.Normal : TextInput.Password
+                            rightPadding: horizontalPadding + Style.space(26)
+
+                            Text {
+                                anchors.right: parent.right
+                                anchors.rightMargin: Style.space(6)
+                                anchors.verticalCenter: parent.verticalCenter
+                                text: root.showSecrets ? root.glyphEyeOff : root.glyphEye
+                                textFormat: Text.PlainText
+                                color: eyeHover6.hovered ? Color.accent : Qt.alpha(root.foreground, 0.55)
+                                font.family: root.fontFamily
+                                font.pixelSize: Style.font.body
+
+                                HoverHandler { id: eyeHover6; cursorShape: Qt.PointingHandCursor }
+                                TapHandler { onTapped: root.showSecrets = !root.showSecrets }
+                            }
+
                             placeholderText: "Repeat new password"
                             foreground: root.foreground
                             font.family: root.fontFamily
@@ -2972,6 +3094,127 @@ Panel {
                         }
                     }
                 }
+
+                PanelSeparator {}
+
+                // Danger zone -------------------------------------------
+                Column {
+                    width: parent.width
+                    spacing: Style.space(6)
+
+                    Text {
+                        width: parent.width
+                        text: "Danger zone"
+                        textFormat: Text.PlainText
+                        color: Color.urgent
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                        font.bold: true
+                    }
+
+                    Text {
+                        width: parent.width
+                        text: "Reset the safe to its factory state: every file is erased, and the password and the back-up key stop existing. The next start is a fresh setup. There is no way back."
+                        wrapMode: Text.WordWrap
+                        textFormat: Text.PlainText
+                        color: Qt.alpha(root.foreground, 0.75)
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.bodySmall
+                    }
+
+                    Button {
+                        width: parent.width
+                        text: "Reset the safe…"
+                        foreground: root.foreground
+                        accent: Color.urgent
+                        fontFamily: root.fontFamily
+                        enabled: !!root.svc && root.svc.phase === "unlocked" && !root.svc.busy
+                        onClicked: root.resetConfirmOpen = true
+                    }
+                }
+                }
+            }
+
+            // Factory-reset confirmation ------------------------------------------
+            // A separate modal over everything: the button that ends the safe
+            // sits here, and only here, one deliberate click away.
+            Rectangle {
+                anchors.fill: parent
+                visible: root.resetConfirmOpen
+                color: Qt.rgba(0, 0, 0, 0.55)
+                z: 31
+
+                TapHandler {
+                    onTapped: root.resetConfirmOpen = false
+                }
+
+                Rectangle {
+                    width: Math.min(parent.width - Style.space(48), Style.space(360))
+                    height: resetCol.implicitHeight + Style.space(24)
+                    anchors.centerIn: parent
+                    radius: Math.min(Style.cornerRadius, Style.space(10))
+                    color: Color.popups.background
+                    border.width: 1
+                    border.color: Color.popups.border
+
+                    MouseArea {
+                        anchors.fill: parent
+                    }
+
+                    Column {
+                        id: resetCol
+                        anchors.fill: parent
+                        anchors.margins: Style.space(12)
+                        spacing: Style.space(10)
+
+                        Text {
+                            width: parent.width
+                            text: "Reset the safe?"
+                            textFormat: Text.PlainText
+                            color: Color.urgent
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.body
+                            font.bold: true
+                        }
+
+                        Text {
+                            width: parent.width
+                            text: "Every file inside is erased for good, and the password and the back-up key are gone with them. The safe returns to a fresh install. This cannot be undone."
+                            wrapMode: Text.WordWrap
+                            textFormat: Text.PlainText
+                            color: root.foreground
+                            font.family: root.fontFamily
+                            font.pixelSize: Style.font.bodySmall
+                        }
+
+                        Row {
+                            width: parent.width
+                            spacing: Style.space(8)
+
+                            Button {
+                                width: (parent.width - Style.space(8)) / 2
+                                text: "Cancel"
+                                foreground: root.foreground
+                                accent: Color.accent
+                                fontFamily: root.fontFamily
+                                onClicked: root.resetConfirmOpen = false
+                            }
+
+                            Button {
+                                width: (parent.width - Style.space(8)) / 2
+                                text: "Erase everything"
+                                foreground: root.foreground
+                                accent: Color.urgent
+                                fontFamily: root.fontFamily
+                                enabled: !root.svc || !root.svc.busy
+                                onClicked: {
+                                    root.resetConfirmOpen = false
+                                    if (root.svc)
+                                        root.svc.factoryReset()
+                                }
+                            }
+                        }
+                    }
                 }
             }
 

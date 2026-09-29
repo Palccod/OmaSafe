@@ -600,6 +600,56 @@ Item {
         root.currentFolder = "/"
     }
 
+    // Factory reset: everything goes — every blob, the index, both key
+    // wraps, the preferences, and the keyring copy of the back-up key. The
+    // safe returns to the fresh-install state where the next start asks
+    // for a new password. Irreversible; the widget confirms first, and
+    // this only runs while unlocked with no job mid-flight.
+    function factoryReset() {
+        if (root.phase !== "unlocked" || root.busy)
+            return false
+        // The old session dies first: queued jobs check their captured
+        // generation and stop, the trash grace is cancelled — a reset must
+        // not let a pending Undo resurrect anything — and stage chips die.
+        root._generation++
+        root.sessionKey = ""
+        root.items = []
+        root._staging = ({})
+        root.pendingTrash = []
+        trashTimer.stop()
+        root.clearStaged()
+        autoLockTimer.stop()
+        root.busyLabel = "Resetting the safe…"
+        const gen = root._generation
+        // The whole vault directory: blobs, index.enc, wrap.enc,
+        // recovery.enc. The directory itself is recreated 0700 so the next
+        // initialize finds it exactly as on the very first run.
+        _enqueue(["sh", "-c",
+                  'rm -rf -- "$1" && mkdir -p -- "$1" && chmod 700 -- "$1"',
+                  "omasafe-reset", root.vaultDir], {}, (code, out) => {
+            if (root._stale(gen))
+                return
+            root.busyLabel = ""
+            // Best effort: drop the keyring copy of the back-up key. The
+            // wraps are gone either way, so a surviving copy is a dead key.
+            _enqueue(["secret-tool", "clear", "application", "omasafe", "item"], {}, () => {})
+            // Preferences return to their fresh-install defaults.
+            root.deleteOriginals = true
+            root.autoLockSeconds = 15
+            root.idleLockMinutes = 0
+            root.sortMode = 0
+            root.gridMode = false
+            root.showThumbnails = true
+            root.cryptoMigrated = false
+            root._savePrefs()
+            root.initialized = false
+            root.phase = "empty"
+            root.currentFolder = "/"
+            root._emitToast("The safe is reset — set it up again with a new password")
+        })
+        return true
+    }
+
     // --- browsing ---------------------------------------------------------------
     //
     // The card browses the index like a tiny file system. A folder row is one
