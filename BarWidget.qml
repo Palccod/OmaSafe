@@ -1947,20 +1947,20 @@ Panel {
                                     }
 
                                     onClicked: mouse => {
-                                        // A click opens a folder; files stay
-                                        // inert — extract and destroy live on
-                                        // the buttons. A completed drag
-                                        // attempt must not also navigate.
-                                        // In search mode a click reveals the
-                                        // hit at its real location; in select
-                                        // mode it toggles the pick instead.
+                                        // File-manager click model, same as
+                                        // the grid: single click highlights,
+                                        // double click opens. Select mode
+                                        // keeps its click-to-pick.
                                         if (dragging || !root.svc)
                                             return
                                         root.cursorIndex = rowDelegate.index
-                                        if (root.selectMode) {
+                                        if (root.selectMode)
                                             root.toggleSelected(rowDelegate.modelData.path)
+                                    }
+
+                                    onDoubleClicked: mouse => {
+                                        if (dragging || !root.svc || root.selectMode)
                                             return
-                                        }
                                         if (root.searchMode || root.typeFilter > 0) {
                                             root.revealItem(rowDelegate.modelData.path, rowDelegate.isFolder)
                                             return
@@ -2290,17 +2290,25 @@ Panel {
                                         }
 
                                         onClicked: mouse => {
-                                            // In select mode a click toggles
-                                            // the pick; in search mode it
-                                            // reveals the hit at its real
-                                            // location.
+                                            // File-manager click model: a
+                                            // single click only highlights
+                                            // (moves the cursor); the open
+                                            // action is a double click. Only
+                                            // select mode picks on a single
+                                            // click.
                                             if (dragging || !root.svc)
                                                 return
                                             root.cursorIndex = tileDelegate.index
-                                            if (root.selectMode) {
+                                            if (root.selectMode)
                                                 root.toggleSelected(tileDelegate.modelData.path)
+                                        }
+
+                                        onDoubleClicked: mouse => {
+                                            if (dragging || !root.svc || root.selectMode)
                                                 return
-                                            }
+                                            // In search or filter mode the
+                                            // hit reveals at its real
+                                            // location.
                                             if (root.searchMode || root.typeFilter > 0) {
                                                 root.revealItem(tileDelegate.modelData.path, tileDelegate.isFolder)
                                                 return
