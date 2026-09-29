@@ -118,6 +118,8 @@ Panel {
     // Type filter (the sidebar): 0 = all files, then images, documents,
     // music, videos. Non-zero modes list that type vault-wide, flat.
     property int typeFilter: 0
+    // Picks belong to a view; switching the filter drops them.
+    onTypeFilterChanged: root.selectedPaths = []
     readonly property var typeFilterModel: [
         { label: "All Files", icon: root.glyphFolderOpen, empty: "files" },
         { label: "Images", icon: root.glyphImage, empty: "images" },
@@ -617,6 +619,10 @@ Panel {
         target: root.svc
         function onToast(message) {
             root.showToast(String(message))
+        }
+        // Selections belong to a view; moving elsewhere drops them.
+        function onCurrentFolderChanged() {
+            root.selectedPaths = []
         }
         // A group drag waits for the picked items to finish staging; the
         // last staged copy is what lets it start.
@@ -1390,29 +1396,6 @@ Panel {
                 }
             }
 
-            // Right-click on empty listing background — the folder-level
-            // menu. Lives OUTSIDE the Flickable on purpose: the Flickable
-            // re-parents default-property children into its contentItem,
-            // which only spans the rows — the empty space below them would
-            // never be covered. Declared before the Flickable so the item
-            // delegates (which handle their own right-clicks) sit above it;
-            // only right presses matter here, left-button flicking passes
-            // straight through.
-            MouseArea {
-                anchors.top: listingTop.bottom
-                anchors.bottom: fixedBottom.top
-                anchors.left: sidebar.right
-                anchors.right: parent.right
-                anchors.topMargin: Style.space(6)
-                anchors.bottomMargin: Style.space(6)
-                acceptedButtons: Qt.RightButton
-                enabled: root.showContents
-                onClicked: mouse => {
-                    const p = mapToItem(keyCatcher, mouse.x, mouse.y)
-                    root.openContextMenu(null, p.x, p.y)
-                }
-            }
-
             Flickable {
                 id: scroll
                 visible: !root.settingsOpen
@@ -1423,10 +1406,35 @@ Panel {
                 anchors.topMargin: Style.space(6)
                 anchors.bottomMargin: Style.space(6)
                 contentWidth: width
-                contentHeight: content.implicitHeight
+                // The content is padded out to the viewport height when
+                // the folder is short, so the empty area below the rows is
+                // real scroll content — that is what lets the background
+                // mouse area inside receive clicks there.
+                contentHeight: Math.max(content.implicitHeight, height)
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
-                interactive: contentHeight > height
+                interactive: content.implicitHeight > height
+
+                // Empty-space clicks, under the delegates (z -1): left
+                // deselects — clearing the picks and the keyboard cursor —
+                // and right raises the folder menu. The Flickable re-parents
+                // this into its contentItem, which now spans the whole
+                // viewport.
+                MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.LeftButton | Qt.RightButton
+                    enabled: root.showContents
+                    z: -1
+                    onClicked: mouse => {
+                        const p = mapToItem(keyCatcher, mouse.x, mouse.y)
+                        if (mouse.button === Qt.RightButton) {
+                            root.openContextMenu(null, p.x, p.y)
+                            return
+                        }
+                        root.selectedPaths = []
+                        root.cursorIndex = -1
+                    }
+                }
 
                 Column {
                     id: content
@@ -2134,10 +2142,14 @@ Panel {
                                             return
                                         }
                                         root.cursorIndex = rowDelegate.index
-                                        // Ctrl+click toggles the pick,
-                                        // whatever the view mode.
+                                        // Ctrl+click toggles the pick; a
+                                        // plain click resets the picks and
+                                        // just highlights, like any file
+                                        // explorer.
                                         if (mouse.modifiers & Qt.ControlModifier)
                                             root.toggleSelected(rowDelegate.modelData.path)
+                                        else
+                                            root.selectedPaths = []
                                     }
 
                                     onDoubleClicked: mouse => {
@@ -2491,10 +2503,14 @@ Panel {
                                                 return
                                             }
                                             root.cursorIndex = tileDelegate.index
-                                            // Ctrl+click toggles the pick,
-                                            // whatever the view mode.
+                                            // Ctrl+click toggles the pick; a
+                                            // plain click resets the picks and
+                                            // just highlights, like any file
+                                            // explorer.
                                             if (mouse.modifiers & Qt.ControlModifier)
                                                 root.toggleSelected(tileDelegate.modelData.path)
+                                            else
+                                                root.selectedPaths = []
                                         }
 
                                         onDoubleClicked: mouse => {
