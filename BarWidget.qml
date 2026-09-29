@@ -1390,6 +1390,29 @@ Panel {
                 }
             }
 
+            // Right-click on empty listing background — the folder-level
+            // menu. Lives OUTSIDE the Flickable on purpose: the Flickable
+            // re-parents default-property children into its contentItem,
+            // which only spans the rows — the empty space below them would
+            // never be covered. Declared before the Flickable so the item
+            // delegates (which handle their own right-clicks) sit above it;
+            // only right presses matter here, left-button flicking passes
+            // straight through.
+            MouseArea {
+                anchors.top: listingTop.bottom
+                anchors.bottom: fixedBottom.top
+                anchors.left: sidebar.right
+                anchors.right: parent.right
+                anchors.topMargin: Style.space(6)
+                anchors.bottomMargin: Style.space(6)
+                acceptedButtons: Qt.RightButton
+                enabled: root.showContents
+                onClicked: mouse => {
+                    const p = mapToItem(keyCatcher, mouse.x, mouse.y)
+                    root.openContextMenu(null, p.x, p.y)
+                }
+            }
+
             Flickable {
                 id: scroll
                 visible: !root.settingsOpen
@@ -1404,20 +1427,6 @@ Panel {
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
                 interactive: contentHeight > height
-
-                // Right-click on empty background — the folder-level menu.
-                // Only the right button is accepted, so left-button flicking
-                // passes straight through to the Flickable.
-                MouseArea {
-                    anchors.fill: parent
-                    acceptedButtons: Qt.RightButton
-                    enabled: root.showContents
-                    z: -1
-                    onClicked: mouse => {
-                        const p = mapToItem(keyCatcher, mouse.x, mouse.y)
-                        root.openContextMenu(null, p.x, p.y)
-                    }
-                }
 
                 Column {
                     id: content
