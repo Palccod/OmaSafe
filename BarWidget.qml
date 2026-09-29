@@ -281,9 +281,9 @@ Panel {
         root.ensureCursorVisible()
     }
 
-    // Enter/Space — the same semantics a click on the item has.
-    function activateCursor() {
-        const it = root.cursorItem()
+    // Enter/Space/double-click/open-menu — the same semantics a double
+    // click on the item has.
+    function activateItem(it) {
         if (!it || !root.svc)
             return
         if (root.selectMode) {
@@ -300,6 +300,10 @@ Panel {
             return
         }
         root.openPreview(it.path)
+    }
+
+    function activateCursor() {
+        root.activateItem(root.cursorItem())
     }
 
     function renameCursor() {
@@ -338,6 +342,44 @@ Panel {
             scroll.contentY = y
         else if (y + child.height > scroll.contentY + scroll.height)
             scroll.contentY = y + child.height - scroll.height
+    }
+
+    // Context menu: right-click an item (or the empty background — ctxItem
+    // null) for the file-manager actions. Position travels in ctxPos, in
+    // the card-content coordinates the menu itself lives in.
+    property bool ctxOpen: false
+    property var ctxItem: null
+    property point ctxPos: Qt.point(0, 0)
+
+    function openContextMenu(item, x, y) {
+        root.ctxItem = item
+        if (item) {
+            const idx = root.currentListing.findIndex(it => it.path === item.path)
+            if (idx >= 0)
+                root.cursorIndex = idx
+        }
+        root.ctxPos = Qt.point(x, y)
+        root.ctxOpen = true
+    }
+
+    // The menu entries for the current ctxItem — null means the background.
+    readonly property var ctxEntries: {
+        const it = root.ctxItem
+        if (!it)
+            return [{ label: "Select all", fn: function () { root.selectAllVisible() } }]
+        const out = []
+        if (it.isDir && it.legacy !== true)
+            out.push({ label: "Open", fn: function () { root.activateItem(it) } })
+        else if (!it.isDir)
+            out.push({ label: "Preview", fn: function () { root.activateItem(it) } })
+        out.push({ label: "Rename", fn: function () {
+            root.beginRename(it.path, SafeModel.baseNameOf(it.path), it.isDir === true)
+        } })
+        out.push({ label: "Unlock to Downloads/OmaSafe", fn: function () {
+            if (root.svc) root.svc.extractAt(it.path)
+        } })
+        out.push({ label: "Delete", danger: true, fn: function () { root.requestDelete(it.path) } })
+        return out
     }
 
     // Select mode: clicks toggle selection instead of opening; a bar offers
@@ -798,8 +840,12 @@ Panel {
 
                 onCloseRequested: {
                 // ESC peels the layers back before it closes the window:
-                // preview, then settings, then selection picks, then select
-                // mode, then the card itself.
+                // context menu, then preview, then settings, then selection
+                // picks, then select mode, then the card itself.
+                if (root.ctxOpen) {
+                    root.ctxOpen = false
+                    return
+                }
                 if (root.previewOpen) {
                     root.closePreview()
                     return
@@ -1255,6 +1301,20 @@ Panel {
                 clip: true
                 boundsBehavior: Flickable.StopAtBounds
                 interactive: contentHeight > height
+
+                // Right-click on empty background — the folder-level menu.
+                // Only the right button is accepted, so left-button flicking
+                // passes straight through to the Flickable.
+                MouseArea {
+                    anchors.fill: parent
+                    acceptedButtons: Qt.RightButton
+                    enabled: root.showContents
+                    z: -1
+                    onClicked: mouse => {
+                        const p = mapToItem(keyCatcher, mouse.x, mouse.y)
+                        root.openContextMenu(null, p.x, p.y)
+                    }
+                }
 
                 Column {
                     id: content
@@ -1911,13 +1971,15 @@ Panel {
                                 MouseArea {
                                     id: rowDrag
                                     anchors.fill: parent
-                                    acceptedButtons: Qt.LeftButton
+                                    acceptedButtons: Qt.LeftButton | Qt.RightButton
                                     preventStealing: true
 
                                     property point pressPoint: Qt.point(0, 0)
                                     property bool dragging: false
 
                                     onPressed: mouse => {
+                                        if (!(mouse.buttons & Qt.LeftButton))
+                                            return
                                         pressPoint = Qt.point(mouse.x, mouse.y)
                                         dragging = false
                                         rowDelegate.refreshDragImage()
@@ -1950,9 +2012,15 @@ Panel {
                                         // File-manager click model, same as
                                         // the grid: single click highlights,
                                         // double click opens. Select mode
-                                        // keeps its click-to-pick.
+                                        // keeps its click-to-pick. Right
+                                        // click raises the context menu.
                                         if (dragging || !root.svc)
                                             return
+                                        if (mouse.button === Qt.RightButton) {
+                                            const p = rowDelegate.mapToItem(keyCatcher, mouse.x, mouse.y)
+                                            root.openContextMenu(rowDelegate.modelData, p.x, p.y)
+                                            return
+                                        }
                                         root.cursorIndex = rowDelegate.index
                                         if (root.selectMode)
                                             root.toggleSelected(rowDelegate.modelData.path)
@@ -2259,13 +2327,15 @@ Panel {
                                     MouseArea {
                                         id: tileDrag
                                         anchors.fill: parent
-                                        acceptedButtons: Qt.LeftButton
+                                        acceptedButtons: Qt.LeftButton | Qt.RightButton
                                         preventStealing: true
 
                                         property point pressPoint: Qt.point(0, 0)
                                         property bool dragging: false
 
                                         onPressed: mouse => {
+                                            if (!(mouse.buttons & Qt.LeftButton))
+                                                return
                                             pressPoint = Qt.point(mouse.x, mouse.y)
                                             dragging = false
                                             tileDelegate.refreshDragImage()
@@ -2295,9 +2365,15 @@ Panel {
                                             // (moves the cursor); the open
                                             // action is a double click. Only
                                             // select mode picks on a single
-                                            // click.
+                                            // click. Right click raises the
+                                            // context menu.
                                             if (dragging || !root.svc)
                                                 return
+                                            if (mouse.button === Qt.RightButton) {
+                                                const p = tileDelegate.mapToItem(keyCatcher, mouse.x, mouse.y)
+                                                root.openContextMenu(tileDelegate.modelData, p.x, p.y)
+                                                return
+                                            }
                                             root.cursorIndex = tileDelegate.index
                                             if (root.selectMode)
                                                 root.toggleSelected(tileDelegate.modelData.path)
@@ -3014,6 +3090,81 @@ Panel {
                                 fontFamily: root.fontFamily
                                 enabled: !root.svc || !root.svc.busy
                                 onClicked: root.commitRename()
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Context menu -------------------------------------------------------
+            // Right-click menu, file-manager style: acts on the item under
+            // the pointer, or on the folder itself when raised on empty
+            // space (ctxItem null). A transparent backdrop closes it on any
+            // outside click; Escape closes it through the key catcher.
+            Item {
+                anchors.fill: parent
+                visible: root.ctxOpen
+                z: 28
+
+                MouseArea {
+                    anchors.fill: parent
+                    onClicked: root.ctxOpen = false
+                }
+
+                Rectangle {
+                    width: ctxMenuColumn.width + Style.space(2)
+                    height: ctxMenuColumn.height + Style.space(2)
+                    x: Math.max(Style.space(4), Math.min(root.ctxPos.x, parent.width - width - Style.space(4)))
+                    y: Math.max(Style.space(4), Math.min(root.ctxPos.y, parent.height - height - Style.space(4)))
+                    radius: Math.min(Style.cornerRadius, Style.space(8))
+                    color: Color.popups.background
+                    border.width: 1
+                    border.color: Color.popups.border
+
+                    Column {
+                        id: ctxMenuColumn
+                        anchors.centerIn: parent
+                        width: Style.space(200)
+
+                        Repeater {
+                            model: root.ctxEntries
+
+                            delegate: Item {
+                                required property int index
+                                required property var modelData
+                                width: ctxMenuColumn.width
+                                height: Style.space(30)
+
+                                Rectangle {
+                                    anchors.fill: parent
+                                    anchors.margins: Style.space(2)
+                                    radius: Math.min(Style.cornerRadius, Style.space(5))
+                                    color: entryHover.hovered ? Qt.alpha(root.foreground, 0.08) : "transparent"
+                                }
+
+                                Text {
+                                    anchors.left: parent.left
+                                    anchors.leftMargin: Style.space(10)
+                                    anchors.right: parent.right
+                                    anchors.rightMargin: Style.space(10)
+                                    anchors.verticalCenter: parent.verticalCenter
+                                    text: modelData.label
+                                    textFormat: Text.PlainText
+                                    elide: Text.ElideRight
+                                    color: modelData.danger ? Color.urgent : root.foreground
+                                    font.family: root.fontFamily
+                                    font.pixelSize: Style.font.bodySmall
+                                }
+
+                                HoverHandler { id: entryHover }
+
+                                TapHandler {
+                                    onTapped: {
+                                        root.ctxOpen = false
+                                        if (modelData.fn)
+                                            modelData.fn()
+                                    }
+                                }
                             }
                         }
                     }
