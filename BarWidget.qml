@@ -246,6 +246,100 @@ Panel {
         }
     }
 
+    // Keyboard navigation: PanelKeyCatcher drives a cursor over the current
+    // listing — arrows or hjkl to move, Enter/Space to activate, F2 to
+    // rename, Delete or x to trash (undoable), Ctrl+A to select all. The
+    // cursor is an index into currentListing, the same order the list and
+    // grid Repeaters show.
+    property int cursorIndex: -1
+
+    function navActive() {
+        return root.showContents && !root.previewOpen && !root.settingsOpen
+            && !root.renameOpen && !!root.svc && root.svc.phase === "unlocked"
+            && root.currentListing.length > 0
+    }
+
+    function cursorItem() {
+        return root.navActive() && root.cursorIndex >= 0
+            && root.cursorIndex < root.currentListing.length
+            ? root.currentListing[root.cursorIndex] : null
+    }
+
+    function moveCursor(dx, dy) {
+        if (!root.navActive())
+            return
+        if (root.cursorIndex < 0) {
+            root.cursorIndex = 0
+            root.ensureCursorVisible()
+            return
+        }
+        const step = dx !== 0 ? dx : dy * (root.gridMode ? tilesGrid.columns : 1)
+        if (step === 0)
+            return
+        root.cursorIndex = Math.max(0, Math.min(root.currentListing.length - 1,
+                                                root.cursorIndex + step))
+        root.ensureCursorVisible()
+    }
+
+    // Enter/Space — the same semantics a click on the item has.
+    function activateCursor() {
+        const it = root.cursorItem()
+        if (!it || !root.svc)
+            return
+        if (root.selectMode) {
+            root.toggleSelected(it.path)
+            return
+        }
+        if (root.searchMode || root.typeFilter > 0) {
+            root.revealItem(it.path, it.isDir === true)
+            return
+        }
+        if (it.isDir === true) {
+            if (it.legacy !== true)
+                root.svc.navigate(it.path)
+            return
+        }
+        root.openPreview(it.path)
+    }
+
+    function renameCursor() {
+        const it = root.cursorItem()
+        if (!it)
+            return
+        root.beginRename(it.path, SafeModel.baseNameOf(it.path), it.isDir === true)
+    }
+
+    function deleteCursor() {
+        const it = root.cursorItem()
+        if (!it)
+            return
+        if (root.selectMode && root.selectedCount > 0)
+            root.deleteSelected()
+        else
+            root.requestDelete(it.path)
+    }
+
+    function selectAllVisible() {
+        if (!root.navActive())
+            return
+        root.selectMode = true
+        root.selectedPaths = root.currentListing.map(it => String(it.path))
+    }
+
+    // Keeps the cursor row on screen: map the delegate into the flick and
+    // nudge contentY when it leaves the viewport.
+    function ensureCursorVisible() {
+        const rep = root.gridMode ? tilesRepeater : listRepeater
+        const child = rep ? rep.itemAt(root.cursorIndex) : null
+        if (!child)
+            return
+        const y = child.mapToItem(scroll.contentItem, 0, 0).y
+        if (y < scroll.contentY)
+            scroll.contentY = y
+        else if (y + child.height > scroll.contentY + scroll.height)
+            scroll.contentY = y + child.height - scroll.height
+    }
+
     // Select mode: clicks toggle selection instead of opening; a bar offers
     // the bulk actions on everything chosen.
     property bool selectMode: false
@@ -664,10 +758,42 @@ Panel {
         focusTarget: keyCatcher
         onCloseRequested: root.close()
 
-        PanelKeyCatcher {
-            id: keyCatcher
-            anchors.fill: parent
-            onCloseRequested: {
+        // Extra keys the shared catcher doesn't know (F2, Delete, Ctrl+A):
+        // it passes them over unaccepted and they bubble up to here.
+        Item {
+            id: keyZone
+
+            Keys.onPressed: function (event) {
+                if (!root.navActive())
+                    return
+                if (event.key === Qt.Key_F2) {
+                    root.renameCursor()
+                    event.accepted = true
+                } else if (event.key === Qt.Key_Delete) {
+                    root.deleteCursor()
+                    event.accepted = true
+                } else if (event.key === Qt.Key_A
+                           && (event.modifiers & Qt.ControlModifier)) {
+                    root.selectAllVisible()
+                    event.accepted = true
+                }
+            }
+
+            PanelKeyCatcher {
+                id: keyCatcher
+                anchors.fill: parent
+
+                // While any text field in the card holds focus (search,
+                // unlock password, rename) every key belongs to it — the
+                // dispatcher would otherwise eat letters like x or j before
+                // they reach the field, and Escape would close the card.
+                blocked: root.renameOpen || !keyCatcher.activeFocus
+
+                onMoveRequested: function (dx, dy) { root.moveCursor(dx, dy) }
+                onActivateRequested: root.activateCursor()
+                onDeleteRequested: root.deleteCursor()
+
+                onCloseRequested: {
                 // ESC peels the layers back before it closes the window:
                 // preview, then settings, then selection picks, then select
                 // mode, then the card itself.
@@ -1054,6 +1180,8 @@ Panel {
                         rightPadding: root.searchMode ? Style.space(28) : 0
                         onTextChanged: root.searchQuery = text
                         Keys.onEscapePressed: root.exitSearch()
+                        // Enter hands control back to the keyboard cursor.
+                        Keys.onReturnPressed: keyCatcher.forceActiveFocus()
                     }
 
                     PanelActionButton {
@@ -1633,6 +1761,7 @@ Panel {
                             spacing: Style.space(8)
 
                         Repeater {
+                            id: listRepeater
                             model: root.currentListing
 
                             delegate: Rectangle {
@@ -1676,13 +1805,18 @@ Panel {
                                 implicitHeight: Style.space(56)
                                 radius: Math.min(Style.cornerRadius, Style.space(8))
                                 // File-manager style: rows sit on the plain
-                                // background until hovered.
+                                // background until hovered; the keyboard
+                                // cursor draws a thin accent outline.
                                 color: rowDelegate.modelData.path === root.flashPath ? Qt.alpha(Color.accent, 0.22)
-                                    : rowDelegate.folderHover || rowHover.hovered ? Qt.alpha(root.foreground, 0.07) : "transparent"
+                                    : rowDelegate.folderHover || rowHover.hovered ? Qt.alpha(root.foreground, 0.07)
+                                    : root.cursorIndex === rowDelegate.index ? Qt.alpha(root.foreground, 0.05)
+                                    : "transparent"
                                 border.width: 1
                                 border.color: root.isSelected(modelData.path) || rowDelegate.folderHover
                                     ? Color.accent
-                                    : (rowHover.hovered ? Qt.alpha(Color.accent, 0.55) : "transparent")
+                                    : (rowHover.hovered ? Qt.alpha(Color.accent, 0.55)
+                                       : root.cursorIndex === rowDelegate.index ? Qt.alpha(Color.accent, 0.4)
+                                       : "transparent")
 
                                 Behavior on color {
                                     ColorAnimation { duration: 90 }
@@ -1819,6 +1953,7 @@ Panel {
                                         // mode it toggles the pick instead.
                                         if (dragging || !root.svc)
                                             return
+                                        root.cursorIndex = rowDelegate.index
                                         if (root.selectMode) {
                                             root.toggleSelected(rowDelegate.modelData.path)
                                             return
@@ -1997,6 +2132,7 @@ Panel {
                             rowSpacing: Style.space(8)
 
                                 Repeater {
+                                id: tilesRepeater
                                 model: root.currentListing
 
                                 delegate: Rectangle {
@@ -2033,13 +2169,19 @@ Panel {
                                         + nameText.implicitHeight + metaText.implicitHeight + Style.space(4)
                                     radius: Math.min(Style.cornerRadius, Style.space(8))
                                     // File-manager style: the tile itself is
-                                    // invisible until the pointer is on it.
+                                    // invisible until the pointer is on it;
+                                    // the keyboard cursor draws a thin
+                                    // accent outline instead.
                                     color: tileDelegate.modelData.path === root.flashPath ? Qt.alpha(Color.accent, 0.22)
-                                        : tileDelegate.folderHover || tileHover.hovered ? Qt.alpha(root.foreground, 0.07) : "transparent"
+                                        : tileDelegate.folderHover || tileHover.hovered ? Qt.alpha(root.foreground, 0.07)
+                                        : root.cursorIndex === tileDelegate.index ? Qt.alpha(root.foreground, 0.05)
+                                        : "transparent"
                                     border.width: 1
                                     border.color: root.isSelected(modelData.path) || tileDelegate.folderHover
                                         ? Color.accent
-                                        : (tileHover.hovered ? Qt.alpha(Color.accent, 0.55) : "transparent")
+                                        : (tileHover.hovered ? Qt.alpha(Color.accent, 0.55)
+                                           : root.cursorIndex === tileDelegate.index ? Qt.alpha(Color.accent, 0.4)
+                                           : "transparent")
 
                                     Behavior on color {
                                         ColorAnimation { duration: 90 }
@@ -2151,6 +2293,7 @@ Panel {
                                             // location.
                                             if (dragging || !root.svc)
                                                 return
+                                            root.cursorIndex = tileDelegate.index
                                             if (root.selectMode) {
                                                 root.toggleSelected(tileDelegate.modelData.path)
                                                 return
@@ -2923,6 +3066,7 @@ Panel {
                     }
                 }
             }
+        }
         }
     }
 

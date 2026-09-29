@@ -1800,7 +1800,15 @@ Item {
                     root.busyLabel = ""
                     return
                 }
-                const vaultPath = root._uniqueVaultPath(folderPath, name, root._takenPaths())
+                // Re-stash replaces: dropping a file whose name already
+                // exists in this folder overwrites that entry in place
+                // instead of piling up "name (2)" copies — unless the name
+                // belongs to a folder, which a file can never replace.
+                const wanted = SafeModel.childPath(folderPath, name)
+                const existing = (root.items || []).find(it => it.path === wanted)
+                const vaultPath = existing && !existing.isDir
+                    ? wanted : root._uniqueVaultPath(folderPath, name, root._takenPaths())
+                const replacedId = existing && !existing.isDir ? existing.id : ""
                 _enqueue(_cipherArgv(path, root.vaultDir + "/" + id, false),
                          { OS_SECRET: root.sessionKey }, (ec, eo) => {
                     if (ec !== 0) {
@@ -1808,7 +1816,7 @@ Item {
                         root._emitToast("Could not lock " + name)
                         return
                     }
-                    _stashCommit(id, vaultPath, size, path, gen)
+                    _stashCommit(id, vaultPath, size, path, gen, replacedId)
                 })
             })
         })
@@ -1819,8 +1827,10 @@ Item {
     // record it in the index, then — and only then — remove the original.
     // A lock that landed mid-pipeline stops here: the blob survives as an
     // unindexed orphan (harmless), the original stays on disk, and nothing
-    // is rewritten under an empty key.
-    function _stashCommit(id, vaultPath, size, originalPath, gen) {
+    // is rewritten under an empty key. A non-empty `replacedId` turns the
+    // commit into an in-place replace: same path, new blob, and the old
+    // blob is deleted only after the index records the new one.
+    function _stashCommit(id, vaultPath, size, originalPath, gen, replacedId) {
         if (root._stale(gen)) {
             root.busyLabel = ""
             root._emitToast("The safe locked before " + SafeModel.baseNameOf(vaultPath)
@@ -1829,13 +1839,25 @@ Item {
         }
         const entry = { id: id, path: vaultPath, isDir: false, legacy: false,
                         size: size, addedAt: Date.now() }
-        const list = root.items.slice()
-        for (const anc of root._ancestorPaths(vaultPath)) {
-            if (!list.some(it => it.path === anc))
-                list.push({ id: "", path: anc, isDir: true, legacy: false,
-                            size: 0, addedAt: entry.addedAt })
+        const replacing = !!replacedId && replacedId !== id
+        let list = (root.items || []).map(it => it.path === vaultPath ? entry : it)
+        if (!list.some(it => it.path === vaultPath)) {
+            // The replace target vanished mid-flight (a rename, a trash
+            // undo) — fall back to a plain append so the blob is never
+            // orphaned from the index.
+            list = root.items.slice()
+            for (const anc of root._ancestorPaths(vaultPath)) {
+                if (!list.some(it => it.path === anc))
+                    list.push({ id: "", path: anc, isDir: true, legacy: false,
+                                size: 0, addedAt: entry.addedAt })
+            }
+            list.push(entry)
         }
-        list.push(entry)
+        // Chips and staged plaintext for the old copy die with it.
+        const staged = Object.assign({}, root.staged)
+        delete staged[vaultPath]
+        root.staged = staged
+        delete root._staging[vaultPath]
         root.items = list
         _writeIndex(ok => {
             root.busyLabel = ""
@@ -1843,15 +1865,19 @@ Item {
                 root._emitToast(SafeModel.baseNameOf(vaultPath) + " is encrypted but not indexed — do not delete the original")
                 return
             }
+            if (replacing)
+                _enqueue(["rm", "-f", "--", root.vaultDir + "/" + replacedId], {}, () => {})
+            const verb = replacing ? "Updated " : "Locked "
+            const base = SafeModel.baseNameOf(vaultPath)
             if (_deletable(originalPath)) {
                 _enqueue(["rm", "-rf", "--", originalPath], {}, (rc, ro) => {
                     if (rc !== 0)
-                        root._emitToast("Locked " + SafeModel.baseNameOf(vaultPath) + " — the original could not be removed")
+                        root._emitToast(verb + base + " — the original could not be removed")
                     else
-                        root._emitToast("Locked " + SafeModel.baseNameOf(vaultPath))
+                        root._emitToast(verb + base)
                 })
             } else {
-                root._emitToast("Locked a copy of " + SafeModel.baseNameOf(vaultPath))
+                root._emitToast(verb + base)
             }
         })
     }
