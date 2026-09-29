@@ -320,10 +320,6 @@ Panel {
     function activateItem(it) {
         if (!it || !root.svc)
             return
-        if (root.selectMode) {
-            root.toggleSelected(it.path)
-            return
-        }
         if (root.searchMode || root.typeFilter > 0) {
             root.revealItem(it.path, it.isDir === true)
             return
@@ -351,7 +347,7 @@ Panel {
         const it = root.cursorItem()
         if (!it)
             return
-        if (root.selectMode && root.selectedCount > 0)
+        if (root.selectedCount > 0)
             root.deleteSelected()
         else
             root.requestDelete(it.path)
@@ -360,7 +356,6 @@ Panel {
     function selectAllVisible() {
         if (!root.navActive())
             return
-        root.selectMode = true
         root.selectedPaths = root.currentListing.map(it => String(it.path))
     }
 
@@ -444,7 +439,7 @@ Panel {
     // Copy/cut act on the context item — or the whole selection in select
     // mode when the item is part of it.
     function clipSourcePaths(item) {
-        if (root.selectMode && item && root.isSelected(item.path))
+        if (item && root.isSelected(item.path))
             return root.selectedPaths.slice()
         return item ? [String(item.path)] : []
     }
@@ -497,19 +492,15 @@ Panel {
         return s
     }
 
-    // Select mode: clicks toggle selection instead of opening; a bar offers
-    // the bulk actions on everything chosen.
-    property bool selectMode: false
+    // Multi-select: Ctrl+click toggles items (no dedicated mode anymore —
+    // the toolbar button is gone), Ctrl+A picks everything visible, and a
+    // bar offers the bulk actions whenever anything is chosen. Dragging a
+    // selected item drags the whole selection.
     property var selectedPaths: []
     readonly property int selectedCount: root.selectedPaths.length
 
     function isSelected(path) {
         return root.selectedPaths.indexOf(String(path)) !== -1
-    }
-
-    function toggleSelectMode() {
-        root.selectMode = !root.selectMode
-        root.selectedPaths = []
     }
 
     function toggleSelected(path) {
@@ -541,7 +532,7 @@ Panel {
                              })
     }
 
-    // Group drag: in select mode, dragging a picked item carries the whole
+    // Group drag: dragging a picked item carries the whole
     // selection. The picked items stage one by one (each is a decrypt job,
     // folders the most work); the drag starts from the initiating row once
     // the last staged copy lands. Dragging an unpicked item stays single.
@@ -563,7 +554,7 @@ Panel {
     // started, or waiting for the remaining decrypts) — the caller skips its
     // single-item drag in that case.
     function beginGroupDrag(item, path) {
-        if (!root.selectMode || !root.isSelected(path))
+        if (!root.isSelected(path))
             return false
         root.groupDragPending = true
         root.groupDragItem = item
@@ -653,7 +644,6 @@ Panel {
             root.changeError = ""
             root.exitSearch()
             root.settingsOpen = false
-            root.selectMode = false
             root.selectedPaths = []
             root.renameOpen = false
             root.renamePath = ""
@@ -969,7 +959,7 @@ Panel {
                 onCloseRequested: {
                 // ESC peels the layers back before it closes the window:
                 // context menu, then preview, then settings, then selection
-                // picks, then select mode, then the card itself.
+                // picks, then the card itself.
                 if (root.ctxOpen) {
                     root.ctxOpen = false
                     return
@@ -982,11 +972,9 @@ Panel {
                     root.settingsOpen = false
                     return
                 }
-                if (root.selectMode) {
-                    if (root.selectedCount > 0)
-                        root.selectedPaths = []
-                    else
-                        root.selectMode = false
+                if (root.selectedCount > 0) {
+                    // Escape first clears the picks before it closes.
+                    root.selectedPaths = []
                     return
                 }
                 root.close()
@@ -1298,18 +1286,6 @@ Panel {
                     }
 
                     PanelActionButton {
-                        id: selectToggle
-                        anchors.right: sortToggle.left
-                        anchors.rightMargin: Style.space(4)
-                        anchors.verticalCenter: parent.verticalCenter
-                        iconText: root.selectMode ? root.glyphClose : root.glyphSelect
-                        tooltipText: root.selectMode ? "Stop selecting" : "Select items"
-                        foreground: root.foreground
-                        fontFamily: root.fontFamily
-                        onClicked: root.toggleSelectMode()
-                    }
-
-                    PanelActionButton {
                         id: sortToggle
                         anchors.right: layoutToggle.left
                         anchors.rightMargin: Style.space(4)
@@ -1378,10 +1354,9 @@ Panel {
                 }
 
                 // Selection bar — the bulk actions for whatever is
-                // picked in select mode.
+                // picked (Ctrl+click or Ctrl+A).
                 Row {
-                    visible: root.showContents && root.selectMode
-                             && root.selectedCount > 0
+                    visible: root.showContents && root.selectedCount > 0
                     width: parent.width
                     spacing: Style.space(8)
 
@@ -2062,7 +2037,7 @@ Panel {
                                 }
 
                                 function beginDrag() {
-                                    // In select mode a picked item drags the
+                                    // A picked item drags the
                                     // whole selection (staged asynchronously;
                                     // the service's stagedChanged finishes it).
                                     if (root.beginGroupDrag(rowDelegate, rowDelegate.modelData.path))
@@ -2139,9 +2114,9 @@ Panel {
                                     onClicked: mouse => {
                                         // File-manager click model, same as
                                         // the grid: single click highlights,
-                                        // double click opens. Select mode
-                                        // keeps its click-to-pick. Right
-                                        // click raises the context menu.
+                                        // double click opens. Ctrl+click
+                                        // picks. Right click raises the
+                                        // context menu.
                                         if (dragging || !root.svc)
                                             return
                                         if (mouse.button === Qt.RightButton) {
@@ -2150,12 +2125,14 @@ Panel {
                                             return
                                         }
                                         root.cursorIndex = rowDelegate.index
-                                        if (root.selectMode)
+                                        // Ctrl+click toggles the pick,
+                                        // whatever the view mode.
+                                        if (mouse.modifiers & Qt.ControlModifier)
                                             root.toggleSelected(rowDelegate.modelData.path)
                                     }
 
                                     onDoubleClicked: mouse => {
-                                        if (dragging || !root.svc || root.selectMode)
+                                        if (dragging || !root.svc)
                                             return
                                         if (root.searchMode || root.typeFilter > 0) {
                                             root.revealItem(rowDelegate.modelData.path, rowDelegate.isFolder)
@@ -2494,10 +2471,9 @@ Panel {
                                             // File-manager click model: a
                                             // single click only highlights
                                             // (moves the cursor); the open
-                                            // action is a double click. Only
-                                            // select mode picks on a single
-                                            // click. Right click raises the
-                                            // context menu.
+                                            // action is a double click and
+                                            // Ctrl+click picks. Right click
+                                            // raises the context menu.
                                             if (dragging || !root.svc)
                                                 return
                                             if (mouse.button === Qt.RightButton) {
@@ -2506,12 +2482,14 @@ Panel {
                                                 return
                                             }
                                             root.cursorIndex = tileDelegate.index
-                                            if (root.selectMode)
+                                            // Ctrl+click toggles the pick,
+                                            // whatever the view mode.
+                                            if (mouse.modifiers & Qt.ControlModifier)
                                                 root.toggleSelected(tileDelegate.modelData.path)
                                         }
 
                                         onDoubleClicked: mouse => {
-                                            if (dragging || !root.svc || root.selectMode)
+                                            if (dragging || !root.svc)
                                                 return
                                             // In search or filter mode the
                                             // hit reveals at its real
