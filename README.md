@@ -4,14 +4,17 @@
 
 An encrypted drop-safe for Omarchy's bar. Drag files, media, or whole folders
 onto the safe and they are locked away: each file is encrypted with
-AES-256-CBC (PBKDF2, 250k iterations) and sealed with an HMAC-SHA256
-authentication tag that is verified before anything is ever decrypted — a
+AES-256-CBC under a key behind a 250,000-iteration PBKDF2 stretch and sealed
+with an HMAC-SHA256 authentication tag whose key sits behind the same
+stretch, and the tag is verified before anything is ever decrypted — a
 tampered file is refused, not opened — and the original is removed. Opening
 the safe opens a floating, resizable file explorer: a sidebar that filters
 the whole vault by type, whole-vault search, list and grid views with image
 thumbnails, undoable deletes, a preview lightbox, and drop-into-folder
 filing. Safes from before 0.6.0 are upgraded to the authenticated format
-automatically, a few files at a time, on the first unlock after the update.
+automatically, a few files at a time, on the first unlock after the update;
+safes from before 1.6.2 have their password wrap re-wrapped in the fully
+stretched format on the first password unlock after the update.
 
 | Whole-vault search | Multi-select |
 | --- | --- |

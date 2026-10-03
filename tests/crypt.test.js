@@ -4,6 +4,7 @@
 
 import { test } from "node:test"
 import assert from "node:assert"
+import crypto from "node:crypto"
 import { execFileSync, spawnSync } from "node:child_process"
 import fs from "node:fs"
 import os from "node:os"
@@ -47,6 +48,33 @@ function legacyEncrypt(src, dst, secret) {
     })
 }
 
+function v3Encrypt(src, dst, secret) {
+    // Exactly what OmaSafe 0.6.0–1.6.1 wrote: an openssl PBKDF2 body with
+    // an HMAC tag under a MAC key derived straight from the secret — the
+    // derivation the 1.6.2 finding was about. Built here independently of
+    // the helper, so the helper's v3 readback is tested against something
+    // that never shared its code.
+    const bodyPath = dst + ".body"
+    const e = spawnSync("openssl", ["enc", "-aes-256-cbc", "-pbkdf2",
+                                    "-iter", "250000", "-salt", "-in", src,
+                                    "-out", bodyPath,
+                                    "-pass", "env:OS_SECRET"], {
+        env: Object.assign({}, process.env, { OS_SECRET: secret }),
+        encoding: "utf8"
+    })
+    if (e.status !== 0)
+        return e
+    const body = fs.readFileSync(bodyPath)
+    const macKey = crypto.createHmac("sha256", secret)
+                          .update("omasafe mac key v3").digest()
+    const tag = crypto.createHmac("sha256", macKey)
+                      .update(Buffer.concat([Buffer.from("OMASAFE3\n"), body]))
+                      .digest()
+    fs.writeFileSync(dst, Buffer.concat([Buffer.from("OMASAFE3\n"), body, tag]))
+    fs.rmSync(bodyPath, { force: true })
+    return { status: 0 }
+}
+
 test("encrypt/decrypt roundtrip through a file", () => {
     const d = tmp()
     const src = path.join(d, "plain")
@@ -56,7 +84,7 @@ test("encrypt/decrypt roundtrip through a file", () => {
     const e = encrypt(src, enc, SECRET)
     assert.equal(e.status, 0, e.stderr)
     assert.notEqual(fs.readFileSync(enc, "utf8"), "the quick brown fox")
-    assert.equal(check(enc).stdout.trim(), "v3")
+    assert.equal(check(enc).stdout.trim(), "v4")
     const r = decrypt(enc, dec, SECRET)
     assert.equal(r.status, 0, r.stderr)
     assert.equal(fs.readFileSync(dec, "utf8"), "the quick brown fox")
@@ -146,7 +174,7 @@ test("legacy openssl files decrypt with the legacy exit code", () => {
     fs.rmSync(d, { recursive: true, force: true })
 })
 
-test("legacy file re-encrypted under the helper becomes v3", () => {
+test("legacy file re-encrypted under the helper becomes v4", () => {
     const d = tmp()
     const src = path.join(d, "plain")
     const enc = path.join(d, "enc")
@@ -161,10 +189,63 @@ test("legacy file re-encrypted under the helper becomes v3", () => {
     const e = encrypt(dec, enc + ".new", SECRET)
     assert.equal(e.status, 0, e.stderr)
     fs.renameSync(enc + ".new", enc)
-    assert.equal(check(enc).stdout.trim(), "v3")
+    assert.equal(check(enc).stdout.trim(), "v4")
     const r = decrypt(enc, dec + "2", SECRET)
     assert.equal(r.status, 0)
     assert.equal(fs.readFileSync(dec + "2", "utf8"), "migrate me")
+    fs.rmSync(d, { recursive: true, force: true })
+})
+
+test("a v3 file from 1.6.1 and earlier still decrypts", () => {
+    const d = tmp()
+    const src = path.join(d, "plain")
+    const enc = path.join(d, "enc")
+    fs.writeFileSync(src, "wrapped by 1.6.1")
+    const e = v3Encrypt(src, enc, SECRET)
+    assert.equal(e.status, 0, e.stderr)
+    assert.equal(check(enc).stdout.trim(), "v3")
+    const r = decrypt(enc, "-", SECRET)
+    assert.equal(r.status, 0, r.stderr)
+    assert.equal(r.stdout, "wrapped by 1.6.1")
+    fs.rmSync(d, { recursive: true, force: true })
+})
+
+test("a v3 file with the wrong secret is refused", () => {
+    const d = tmp()
+    const src = path.join(d, "plain")
+    const enc = path.join(d, "enc")
+    fs.writeFileSync(src, "wrapped by 1.6.1")
+    v3Encrypt(src, enc, SECRET)
+    const r = decrypt(enc, "-", OTHER)
+    assert.equal(r.status, 3)
+    assert.equal(r.stdout, "")
+    fs.rmSync(d, { recursive: true, force: true })
+})
+
+test("a v3 file with a flipped ciphertext byte is refused", () => {
+    const d = tmp()
+    const src = path.join(d, "plain")
+    const enc = path.join(d, "enc")
+    fs.writeFileSync(src, "wrapped by 1.6.1")
+    v3Encrypt(src, enc, SECRET)
+    const buf = fs.readFileSync(enc)
+    buf[buf.length >> 1] ^= 0x01
+    fs.writeFileSync(enc, buf)
+    const r = decrypt(enc, "-", SECRET)
+    assert.equal(r.status, 3)
+    fs.rmSync(d, { recursive: true, force: true })
+})
+
+test("every write carries a fresh salt: equal plaintext never repeats a ciphertext", () => {
+    const d = tmp()
+    const src = path.join(d, "plain")
+    const one = path.join(d, "one")
+    const two = path.join(d, "two")
+    fs.writeFileSync(src, "same bytes, different keys")
+    encrypt(src, one, SECRET)
+    encrypt(src, two, SECRET)
+    assert.ok(!fs.readFileSync(one).equals(fs.readFileSync(two)),
+              "two encrypts of the same plaintext must differ")
     fs.rmSync(d, { recursive: true, force: true })
 })
 

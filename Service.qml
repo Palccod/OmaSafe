@@ -23,13 +23,18 @@ import "bridge" as OmaSafeBridge
 //   ~/.local/share/.omasafe/vault/<id>       one blob per FILE, filename is
 //                                            a random 32-hex id
 //
-// Every file is authenticated (omasafe-crypt.py): AES-256-CBC + PBKDF2
-// wrapped in encrypt-then-MAC — an HMAC-SHA256 tag over header and
-// ciphertext, verified in full before any decryption runs, so tampered
-// ciphertext is refused before plaintext can exist. Files from before
-// 0.6.0 have no tag; they still open, and each one is migrated to the
-// tagged format as soon as the session holds the secret it was wrapped
-// with (see _migrateWraps and _reencryptBlob).
+// Every file is authenticated (omasafe-crypt.py): AES-256-CBC under a key
+// behind the full 250,000-iteration PBKDF2 stretch, wrapped in
+// encrypt-then-MAC — an HMAC-SHA256 tag over header and ciphertext,
+// verified in full before any decryption runs, so tampered ciphertext is
+// refused before plaintext can exist. Since 1.6.2 the tag key is derived
+// behind that same stretch (format v4); before that it took one straight
+// HMAC from the secret, which made a copy of wrap.enc a cheap
+// password-guessing oracle. Old files still open: v3 keeps its tag —
+// sound for the random vault and back-up keys it mostly guards — and
+// pre-0.6.0 files have no tag at all. Each is rewritten as soon as the
+// session holds the secret it was wrapped with (see _upgradeWrapFormat,
+// _migrateWraps and _reencryptBlob); every write lands in v4.
 //
 // The index is a tiny file system: every entry carries a vault-absolute path
 // ("/photos", "/photos/cat.jpg"); folder entries are structural markers and
@@ -243,15 +248,17 @@ Item {
         }
     }
 
-    // One encrypt/decrypt of a file, run by the shipped helper:
-    // AES-256-CBC (PBKDF2, 250k iterations) wrapped in encrypt-then-MAC.
-    // The secret always arrives through the environment variable OS_SECRET —
-    // never argv — and an empty `dst` means stdout: the plaintext comes back
-    // through the pipe and never touches the disk. On decrypt the helper
-    // verifies the HMAC tag over the whole ciphertext before openssl runs,
-    // so tampered ciphertext can never produce plaintext; exit code
+    // One encrypt/decrypt of a file, run by the shipped helper: AES-256-CBC
+    // with both the cipher key and the tag key behind the 250,000-iteration
+    // PBKDF2 stretch, wrapped in encrypt-then-MAC. The secret always
+    // arrives through the environment variable OS_SECRET — never argv —
+    // and an empty `dst` means stdout: the plaintext comes back through
+    // the pipe and never touches the disk. On decrypt the helper verifies
+    // the HMAC tag over the whole ciphertext before openssl runs, so
+    // tampered ciphertext can never produce plaintext; exit code
     // `exitLegacy` means the file decrypted fine but was a pre-0.6.0 blob
-    // without a tag, and the caller migrates it.
+    // without a tag, and the caller migrates it. Writes land in the v4
+    // format; decrypts auto-detect v4, v3 and legacy input.
     function _cipherArgv(src, dst, decrypt) {
         return ["python3", root._helperPath("omasafe-crypt.py"),
                 decrypt ? "decrypt" : "encrypt", src, dst === "" ? "-" : dst]
@@ -1059,9 +1066,15 @@ Item {
             root.sessionKey = key
             _loadIndex()
             // A pre-0.6.0 wrap opened fine but has no tag — re-wrap it under
-            // the same password now that the session holds the vault key.
+            // the same password now that the session holds the vault key. A
+            // 1.6.1-or-older wrap has a tag, but its key took no stretch
+            // from the password — see _upgradeWrapFormat — so it is
+            // re-wrapped in the stretched format on the first password
+            // unlock after 1.6.2.
             if (code === root.exitLegacy)
                 root._migrateWraps(attempt, gen)
+            else
+                root._upgradeWrapFormat(attempt, gen)
         })
         return true
     }
@@ -1264,22 +1277,53 @@ Item {
         })
     }
 
-    // --- the 0.6.0 authenticated-format upgrade --------------------------------
+    // --- the format upgrades ----------------------------------------------------
     //
     // Safes written before 0.6.0 used bare AES-256-CBC with no
-    // authentication tag. Every file moves to the tagged format as soon as
-    // the session holds the secret it was wrapped with: wrap.enc on a
-    // password unlock, recovery.enc on a back-up-key unlock, the index
-    // right after it loads, and each blob the first time it is decrypted.
-    // Nothing is migrated under a half-open session — every step re-checks
-    // the generation and the live key — and a step that fails just leaves
-    // the file legacy for the next unlock to retry.
+    // authentication tag, and safes written before 1.6.2 authenticated
+    // under a tag key that took no stretch from the password. Every file
+    // moves forward as soon as the session holds the secret it was wrapped
+    // with: wrap.enc on a password unlock (_migrateWraps — reached both by
+    // a legacy wrap and by _upgradeWrapFormat for a v3 one), recovery.enc
+    // on a back-up-key unlock, the index right after it loads, and each
+    // blob the first time it is decrypted. Nothing is migrated under a
+    // half-open session — every step re-checks the generation and the live
+    // key — and a step that fails just leaves the file old for the next
+    // unlock to retry.
 
     // True when `path` is still a pre-0.6.0 file without a tag.
     function _needsMigration(path, done) {
         _enqueue(["python3", root._helperPath("omasafe-crypt.py"), "check", path],
                  {}, (code, out) => {
             done(code === 0 && out.trim() === "legacy")
+        })
+    }
+
+    // The on-disk format of a tagged file: "v4", "v3", "legacy", or "" when
+    // the check could not run (the caller just retries next unlock).
+    function _wrapFormat(path, done) {
+        _enqueue(["python3", root._helperPath("omasafe-crypt.py"), "check", path],
+                 {}, (code, out) => {
+            done(code === 0 ? out.trim() : "")
+        })
+    }
+
+    // A 1.6.1-or-older wrap (v3) authenticates under a MAC key derived
+    // straight from the password: a copy of wrap.enc let one guess be
+    // checked with two HMACs, never paying the advertised 250,000-iteration
+    // stretch. The first password unlock past 1.6.2 re-wraps wrap.enc in
+    // the v4 format, whose tag key sits behind the full stretch. The index
+    // and the blobs are wrapped by the random vault key, never by the
+    // password, so their v3 copies were never a guessing oracle — they are
+    // simply rewritten in v4 whenever they are written anyway. recovery.enc
+    // is wrapped by the random back-up key and re-wraps itself on the next
+    // rotation or back-up-key unlock.
+    function _upgradeWrapFormat(password, gen) {
+        _wrapFormat(root.wrapPath, fmt => {
+            if (fmt !== "v3" || root._stale(gen)
+                    || !SafeModel.isHex64(root.sessionKey))
+                return
+            root._migrateWraps(password, gen)
         })
     }
 

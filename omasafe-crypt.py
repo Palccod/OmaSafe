@@ -1,27 +1,51 @@
 #!/usr/bin/env python3
 """Authenticated file encryption for OmaSafe.
 
-Every blob, wrap and index file is AES-256-CBC (PBKDF2, 250k iterations,
-via the openssl CLI) wrapped in encrypt-then-MAC: an HMAC-SHA256 tag over
-the header and ciphertext. The tag is verified in full before any
-decryption runs, so tampered ciphertext is refused before plaintext can
-exist.
+Every blob, wrap and index file is AES-256-CBC wrapped in encrypt-then-MAC:
+an HMAC-SHA256 tag over the header and ciphertext. The tag is verified in
+full before any decryption runs, so tampered ciphertext is refused before
+plaintext can exist.
 
-Format v3:  b"OMASAFE3\\n" || ciphertext || tag(32)
-            tag = HMAC-SHA256(macKey, header || ciphertext)
-            macKey = HMAC-SHA256(secret, "omasafe mac key v3")
+Format v4 — what every write produces:
 
-The wrapping secret travels through the environment (OS_SECRET), never
-argv. Files from before 0.6.0 have no header; they still decrypt (there is
-no tag to verify on them) and the caller learns so through exit code 10 to
-migrate them. Writes land through a same-directory temp file created
+    b"OMASAFE4\\n" || salt(16) || ciphertext || tag(32)
+    k      = PBKDF2-HMAC-SHA256(secret, salt, 250000)
+    encKey = HKDF-expand(k, "omasafe v4 encryption key", 32)
+    iv     = HKDF-expand(k, "omasafe v4 iv", 16)
+    macKey = HKDF-expand(k, "omasafe v4 mac key", 32)
+    tag    = HMAC-SHA256(macKey, header || salt || ciphertext)
+
+The secret's whole 250,000-iteration stretch now stands behind the tag key
+too. 1.6.1 and earlier derived it with a single HMAC straight from the
+secret, so a copy of the password-wrapped wrap.enc let an attacker check a
+password guess with two HMACs and never pay the advertised stretch. The
+salt is fresh per write, so equal plaintext never repeats a key or an IV.
+
+Format v3 — still reads, no longer written:
+
+    b"OMASAFE3\\n" || openssl "Salted__" body || tag(32)
+    tag = HMAC-SHA256(HMAC-SHA256(secret, "omasafe mac key v3"),
+                      header || body)
+
+Its tag key takes no stretch, but the secrets it guarded besides the
+password — the vault key and the back-up key — are random 256-bit values,
+so v3 index and blob files were never a guessing oracle and may stay v3
+until they are rewritten anyway. Files from before 0.6.0 have no header at
+all; they still decrypt (there is no tag to verify on them) and the caller
+learns so through exit code 10 to migrate them.
+
+openssl receives the derived key and IV raw (-K/-iv): the stretch runs
+here, once per file, instead of inside every openssl invocation. The
+secret itself travels through the environment (OS_SECRET), never argv —
+only the per-file derived keys touch argv, and those are not reusable
+credentials. Writes land through a same-directory temp file created
 O_NOFOLLOW and renamed into place, so neither the temp nor the destination
 ever writes through a symlink.
 
 usage:
   omasafe-crypt.py encrypt <src> <dst>
   omasafe-crypt.py decrypt <src> <dst|"-" for stdout>
-  omasafe-crypt.py check <path>          prints "v3" or "legacy"
+  omasafe-crypt.py check <path>          prints "v4", "v3" or "legacy"
 
 exit codes: 0 ok, 10 ok but legacy input, 3 authentication failure,
 2 usage/config error, otherwise the openssl exit code.
@@ -34,9 +58,11 @@ import subprocess
 import sys
 import threading
 
-HEADER = b"OMASAFE3\n"
+HEADER = b"OMASAFE4\n"
+V3_HEADER = b"OMASAFE3\n"
 TAG_SIZE = 32
-MAC_INFO = b"omasafe mac key v3"
+SALT_SIZE = 16
+ITERATIONS = 250000
 CHUNK = 1 << 16
 ENV_SECRET = "OS_SECRET"
 
@@ -58,33 +84,62 @@ def _secret():
     return s.encode("utf-8", "surrogateescape")
 
 
-def _mac_key(secret):
-    return hmac.new(secret, MAC_INFO, hashlib.sha256).digest()
+def _hkdf_expand(prk, info, length):
+    # RFC 5869's expand step. The PBKDF2 output is already a uniform
+    # random key, so the extract step has nothing left to concentrate.
+    out = b""
+    block = b""
+    counter = 1
+    while len(out) < length:
+        block = hmac.new(prk, block + info + bytes([counter]),
+                         hashlib.sha256).digest()
+        out += block
+        counter += 1
+    return out[:length]
 
 
-def _openssl(argv, secret):
-    env = dict(os.environ)
-    env[ENV_SECRET] = secret.decode("utf-8", "surrogateescape")
-    return subprocess.Popen(argv, env=env,
-                            stdout=subprocess.PIPE,
-                            stderr=subprocess.DEVNULL)
+def _v4_keys(secret, salt):
+    # One stretch per file, then domain-separated subkeys for the cipher,
+    # the IV and the tag — the tag key is as expensive to reach as the
+    # encryption key.
+    k = hashlib.pbkdf2_hmac("sha256", secret, salt, ITERATIONS)
+    return (_hkdf_expand(k, b"omasafe v4 encryption key", 32),
+            _hkdf_expand(k, b"omasafe v4 iv", 16),
+            _hkdf_expand(k, b"omasafe v4 mac key", 32))
 
 
-# Encrypt reads the plaintext straight from `src` — only stdout is a pipe.
-def _enc_argv(src):
-    return ["openssl", "enc", "-aes-256-cbc", "-pbkdf2", "-iter", "250000",
-            "-salt", "-in", src, "-pass", "env:" + ENV_SECRET]
+def _v3_mac_key(secret):
+    return hmac.new(secret, b"omasafe mac key v3", hashlib.sha256).digest()
 
 
-# v3 decrypt feeds the tag-stripped body through stdin — the file's head
-# and tail are not ciphertext — so no -in argument at all.
-def _dec_stdin_argv():
+def _openssl(argv):
+    # The secret rides the environment, never argv.
+    return subprocess.Popen(argv, env=_env_with_secret(_secret()),
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+
+
+# v4 encrypt hands openssl the derived key and IV raw: no salt header, no
+# KDF inside openssl. Only per-file keys are on argv.
+def _enc_argv(src, enc_key, iv):
+    return ["openssl", "enc", "-aes-256-cbc", "-nosalt",
+            "-K", enc_key.hex(), "-iv", iv.hex(), "-in", src]
+
+
+# v3 decrypt still runs the old password-through-env path, on stdin: the
+# file's head and tail are not ciphertext, so no -in argument at all.
+def _dec_v3_stdin_argv():
     return ["openssl", "enc", "-d", "-aes-256-cbc", "-pbkdf2", "-iter",
             "250000", "-pass", "env:" + ENV_SECRET]
 
 
+# v4 decrypt mirrors v4 encrypt: raw derived key and IV, stdin body.
+def _dec_v4_stdin_argv(enc_key, iv):
+    return ["openssl", "enc", "-d", "-aes-256-cbc", "-nosalt",
+            "-K", enc_key.hex(), "-iv", iv.hex()]
+
+
 # Legacy decrypt consumes the whole file, so it reads it directly.
-def _dec_file_argv(src):
+def _dec_legacy_file_argv(src):
     return ["openssl", "enc", "-d", "-aes-256-cbc", "-pbkdf2", "-iter",
             "250000", "-in", src, "-pass", "env:" + ENV_SECRET]
 
@@ -161,14 +216,17 @@ def _drain(proc, out):
 
 
 def _encrypt(src, dst):
-    mac = hmac.new(_mac_key(_secret()), digestmod=hashlib.sha256)
-    mac.update(HEADER)
+    salt = os.urandom(SALT_SIZE)
+    enc_key, iv, mac_key = _v4_keys(_secret(), salt)
+    mac = hmac.new(mac_key, digestmod=hashlib.sha256)
+    prefix = HEADER + salt
+    mac.update(prefix)
     tmp = _tmp_path(dst)
-    proc = _openssl(_enc_argv(src), _secret())
+    proc = _openssl(_enc_argv(src, enc_key, iv))
     try:
         fd = _open_tmp(tmp)
         with os.fdopen(fd, "wb") as out:
-            out.write(HEADER)
+            out.write(prefix)
             while True:
                 chunk = proc.stdout.read(CHUNK)
                 if not chunk:
@@ -193,19 +251,40 @@ def _encrypt(src, dst):
     sys.exit(EXIT_OK)
 
 
-def _verify_tag(src):
-    """Streams the file once; True when the v3 tag checks out."""
-    size = os.path.getsize(src)
-    if size < len(HEADER) + TAG_SIZE:
-        return False
-    body_end = size - TAG_SIZE
-    mac = hmac.new(_mac_key(_secret()), digestmod=hashlib.sha256)
+def _parse_file(src):
+    """Header facts for a v4 or v3 file, or None when neither matches.
+
+    Returns (mac_key, prefix, body_start, dec_argv): the tag key, the
+    authenticated byte prefix, where the ciphertext starts, and the
+    openssl argv that decrypts that ciphertext.
+    """
     with open(src, "rb") as f:
         head = f.read(len(HEADER))
-        if head != HEADER:
-            return False
-        mac.update(head)
-        remaining = body_end - len(HEADER)
+        if head == HEADER:
+            salt = f.read(SALT_SIZE)
+            if len(salt) != SALT_SIZE:
+                return None
+            enc_key, iv, mac_key = _v4_keys(_secret(), salt)
+            return (mac_key, head + salt, len(HEADER) + SALT_SIZE,
+                    _dec_v4_stdin_argv(enc_key, iv))
+        if head == V3_HEADER:
+            return (_v3_mac_key(_secret()), head, len(V3_HEADER),
+                    _dec_v3_stdin_argv())
+    return None
+
+
+def _verify_tag(src, parsed):
+    """Streams the file once; True when the v4/v3 tag checks out."""
+    mac_key, prefix, body_start, _ = parsed
+    size = os.path.getsize(src)
+    body_end = size - TAG_SIZE
+    if body_end < body_start:
+        return False
+    mac = hmac.new(mac_key, digestmod=hashlib.sha256)
+    mac.update(prefix)
+    with open(src, "rb") as f:
+        f.seek(body_start)
+        remaining = body_end - body_start
         while remaining > 0:
             chunk = f.read(min(CHUNK, remaining))
             if not chunk:
@@ -217,18 +296,18 @@ def _verify_tag(src):
 
 
 def _decrypt(src, dst):
-    if not _verify_tag(src):
+    parsed = _parse_file(src)
+    if parsed is None or not _verify_tag(src, parsed):
         _die(EXIT_AUTH, "authentication failed")
-    body_end = os.path.getsize(src) - TAG_SIZE
-    body_size = body_end - len(HEADER)
+    _, _, body_start, dec_argv = parsed
+    body_size = os.path.getsize(src) - TAG_SIZE - body_start
     # stdin=PIPE: the tag-stripped body is fed to openssl while its
     # plaintext streams back through stdout.
-    proc = subprocess.Popen(
-        _dec_stdin_argv(),
-        env=_env_with_secret(_secret()),
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.DEVNULL)
+    proc = subprocess.Popen(dec_argv,
+                            env=_env_with_secret(_secret()),
+                            stdin=subprocess.PIPE,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL)
     to_stdout = dst == "-"
     tmp = None
     out_fd = None
@@ -241,7 +320,7 @@ def _decrypt(src, dst):
             out = os.fdopen(out_fd, "wb")
             out_fd = None
         feeder = threading.Thread(target=_feed_stdin,
-                                  args=(proc, src, len(HEADER), body_size))
+                                  args=(proc, src, body_start, body_size))
         feeder.start()
         _drain(proc, out)
         feeder.join()
@@ -275,7 +354,7 @@ def _decrypt_legacy(src, dst):
     # No header: a pre-0.6.0 blob. There is no tag to check, so this
     # decrypts exactly as the old openssl-only path did and reports the
     # legacy format through its exit code so the caller can migrate it.
-    proc = _openssl(_dec_file_argv(src), _secret())
+    proc = _openssl(_dec_legacy_file_argv(src))
     to_stdout = dst == "-"
     tmp = None
     out_fd = None
@@ -333,7 +412,8 @@ def main():
             head = _read_head(argv[1])
         except OSError:
             _die(EXIT_USAGE, "cannot read " + argv[1])
-        print("v3" if head == HEADER else "legacy")
+        print("v4" if head == HEADER
+              else "v3" if head == V3_HEADER else "legacy")
         sys.exit(EXIT_OK)
     if len(argv) != 3:
         _die(EXIT_USAGE, "usage: omasafe-crypt.py encrypt|decrypt <src> <dst>")
@@ -347,7 +427,7 @@ def main():
             head = _read_head(src)
         except OSError:
             _die(EXIT_USAGE, "cannot read " + src)
-        if head == HEADER:
+        if head == HEADER or head == V3_HEADER:
             _decrypt(src, dst)
         _decrypt_legacy(src, dst)
     _die(EXIT_USAGE, "unknown mode " + mode)
